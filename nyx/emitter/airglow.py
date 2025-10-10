@@ -1,13 +1,15 @@
-from nsb2 import ASSETS_PATH
+from nyx import ASSETS_PATH
 
 import jax.numpy as jnp
 import numpy as np
 import healpy as hp
 import astropy.units as u
 
-from nsb3.core import get_wavelengths, get_healpix_nside
-from nsb3.core import DiffuseQuery, ParameterSpec
-from nsb3.core.model import EmitterProtocol
+from nyx.core.scene import ComponentType
+from nyx.core import SpectralHandler
+from nyx.core import get_wavelengths, get_healpix_nside
+from nyx.core import DiffuseQuery, ParameterSpec
+from nyx.core.model import EmitterProtocol
 
 class ESOSkyCalc(EmitterProtocol):
     def __init__(self):
@@ -31,7 +33,9 @@ class ESOSkyCalc(EmitterProtocol):
 
         # Write values to jax array:
         Z_vals = jnp.array(theta[mask])
-        flx = jnp.array(self.flx.value)
+
+        # Resample flux to wavelengths:
+        flx = SpectralHandler.resample(self.wvl, self.flx, wavelengths)
         
         def generator(params):
             # Scaling with solar flux
@@ -45,4 +49,4 @@ class ESOSkyCalc(EmitterProtocol):
             'sfu': ParameterSpec((1,), 100, description="Solar flux value [SFU]"),
         }
 
-        return generator, param_specs
+        return generator, param_specs, ComponentType.DIFFUSE

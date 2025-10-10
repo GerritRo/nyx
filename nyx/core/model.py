@@ -2,7 +2,8 @@ import numpy as np
 import astropy.units as u
 from astropy.coordinates import SkyCoord, AltAz, SkyOffsetFrame
 
-from nsb3.core import Scene, get_grid_dim
+from .config import get_grid_dim
+from .scene import Scene, ComponentType
 from typing import Optional, Dict, Any, List, Tuple, Protocol
 
 class AtmosphereProtocol(Protocol):
@@ -60,15 +61,12 @@ class Model:
         self.atmosphere = atmosphere
         self.emitters = emitters
         
-    def query(self, observation: Any) -> 'SceneResult':
-        # Get wavelengths from config
-        wavelengths = config.wavelengths
-        
+    def query(self, observation: Any) -> 'SceneResult':        
         # Build scene
         scene = Scene()
         
         # Add atmosphere
-        atmo_gen, atmo_specs = self.atmosphere.get_generator(wavelengths)
+        atmo_gen, atmo_specs = self.atmosphere.get_generator(observation)
         scene.add_generator(
             name="atmosphere",
             component_type=ComponentType.ATMOSPHERE,
@@ -77,7 +75,7 @@ class Model:
         )
         
         # Add instrument  
-        inst_gen, inst_specs = self.instrument.get_generator(wavelengths)
+        inst_gen, inst_specs = self.instrument.get_generator(observation)
         scene.add_generator(
             name="instrument",
             component_type=ComponentType.INSTRUMENT,
@@ -87,7 +85,7 @@ class Model:
         
         # Add emitters
         for i, emitter in enumerate(self.emitters):
-            em_gen, em_specs, em_type = emitter.get_generator(wavelengths, observation)
+            em_gen, em_specs, em_type = emitter.get_generator(observation)
             scene.add_generator(
                 name=f"emitter_{i}",
                 component_type=em_type,

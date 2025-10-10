@@ -1,5 +1,5 @@
 """
-NSB3 Core Config
+NYX Core Config
 """
 import threading
 import jax.numpy as jnp
@@ -35,7 +35,7 @@ class ConfigParameter:
 
 
 class GlobalConfig:
-    """Global configuration manager for NSB3"""
+    """Global configuration manager for NYX"""
     
     _instance = None
     _lock = threading.Lock()
@@ -159,7 +159,7 @@ class GlobalConfig:
                 
     def summary(self):
         """Print configuration summary"""
-        print("NSB3 Global Configuration")
+        print("NYX Global Configuration")
         print("=" * 60)
         for name, param in self._parameters.items():
             value = param.get()

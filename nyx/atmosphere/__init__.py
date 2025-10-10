@@ -1,4 +1,4 @@
-from nsb3.core import get_parameter
+from nyx.core import get_parameter
 from .airmass import plane_parallel, kasten_young_1989
 
 AIRMASS_FUNCTIONS = {

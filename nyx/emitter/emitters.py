@@ -4,9 +4,9 @@ import healpy as hp
 import astropy.units as u
 from astropy.coordinates import SkyCoord
 
-from nsb3.core import get_wavelengths, get_healpix_nside
-from nsb3.core import CatalogQuery, DiffuseQuery, ParameterSpec
-from nsb3.core.model import EmitterProtocol
+from nyx.core import get_wavelengths, get_healpix_nside
+from nyx.core import CatalogQuery, DiffuseQuery, ParameterSpec
+from nyx.core.model import EmitterProtocol
 
 class DiffuseEmitter(EmitterProtocol):
     def __init__(self, coords, weight, data, spectral_grid):

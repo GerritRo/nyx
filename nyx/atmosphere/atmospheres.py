@@ -4,11 +4,11 @@ import numpy as np
 import healpy as hp
 
 from astropy.coordinates import SkyCoord
-from nsb3.core.model import AtmosphereProtocol
-from nsb3.core import get_wavelengths, get_healpix_nside
-from nsb3.core import AtmosphereQuery, ParameterSpec
-from nsb3.atmosphere import get_airmass_formula
-from nsb3.atmosphere.scattering import rayleigh_phase, henyey_greenstein_phase, gradation_function
+from nyx.core.model import AtmosphereProtocol
+from nyx.core import get_wavelengths, get_healpix_nside
+from nyx.core import AtmosphereQuery, ParameterSpec
+from nyx.atmosphere import get_airmass_formula
+from nyx.atmosphere.scattering import rayleigh_phase, henyey_greenstein_phase, gradation_function
 
 class SingleScatteringAtmosphere(AtmosphereProtocol):
     """

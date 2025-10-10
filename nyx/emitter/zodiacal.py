@@ -1,5 +1,4 @@
-from nsb2 import ASSETS_PATH
-from nsb2.core.utils import SolarSpectrumRieke2008
+from nyx import ASSETS_PATH
 
 import jax.numpy as jnp
 import numpy as np
@@ -10,10 +9,12 @@ from astropy.constants import c, h
 
 from scipy.interpolate import RegularGridInterpolator
 
-from nsb3.core import SunRelativeEclipticFrame
-from nsb3.core import get_wavelengths, get_healpix_nside
-from nsb3.core import DiffuseQuery, ParameterSpec
-from nsb3.core.model import EmitterProtocol
+from nyx.core.scene import ComponentType
+from nyx.utils.spectra import SolarSpectrumRieke2008
+from nyx.core import SunRelativeEclipticFrame
+from nyx.core import get_wavelengths, get_healpix_nside
+from nyx.core import DiffuseQuery, ParameterSpec
+from nyx.core.model import EmitterProtocol
 
 class Leinert1998(EmitterProtocol):
     def __init__(self):
@@ -60,4 +61,4 @@ class Leinert1998(EmitterProtocol):
 
         param_specs = {}
 
-        return generator, param_specs
+        return generator, param_specs, ComponentType.DIFFUSE

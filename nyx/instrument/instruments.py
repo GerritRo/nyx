@@ -4,9 +4,9 @@ import healpy as hp
 import astropy.units as u
 from astropy.coordinates import SkyCoord
 
-from nsb3.core import get_wavelengths, get_healpix_nside
-from nsb3.core import InstrumentQuery, ParameterSpec
-from nsb3.core.model import InstrumentProtocol
+from nyx.core import get_wavelengths, get_healpix_nside
+from nyx.core import InstrumentQuery, ParameterSpec
+from nyx.core.model import InstrumentProtocol
 
 class EffectiveApertureInstrument(InstrumentProtocol):
     """
@@ -32,7 +32,7 @@ class EffectiveApertureInstrument(InstrumentProtocol):
         nside = get_healpix_nside()
         
         # Determine the healpix interpolation:
-        c_coords = SkyCoord(self.centers, unit='rad', frame=observation.frame).transform_to(observation.AltAz)
+        c_coords = SkyCoord(self.centers.copy(), unit='rad', frame=observation.frame).transform_to(observation.AltAz)
         hp_pixel, hp_weight = hp.get_interp_weights(nside, np.pi/2 - c_coords.alt.rad, c_coords.az.rad)
 
         # Evaluate bandpass function:
