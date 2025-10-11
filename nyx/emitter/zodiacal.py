@@ -15,6 +15,7 @@ from nyx.core import SunRelativeEclipticFrame
 from nyx.core import get_wavelengths, get_healpix_nside
 from nyx.core import DiffuseQuery, ParameterSpec
 from nyx.core.model import EmitterProtocol
+from nyx.units import nixify
 
 class Leinert1998(EmitterProtocol):
     def __init__(self):
@@ -50,11 +51,11 @@ class Leinert1998(EmitterProtocol):
         # Get solar spectrum:
         wvl, spectrum = SolarSpectrumRieke2008()
         value_500nm = np.interp(0.5*u.micron, wvl, spectrum)
-        spec_samp = np.interp(wavelengths*u.nm, wvl, spectrum)/value_500nm/(h*c/wavelengths*u.nm) 
+        spec_samp = np.interp(wavelengths*u.nm, wvl, spectrum)/value_500nm
         spectra = spec_samp*self.color_correction(wavelengths, np.clip(np.rad2deg(lat), 30, 90))
 
         # Combined and transform:
-        flux_map = jnp.array((weights[:,None]*spectra).value)
+        flux_map = nixify((weights[:,None]*spectra.value), 'radiance', wavelength=wavelengths)
         
         def generator(params):
             return DiffuseQuery(flux_map=flux_map)

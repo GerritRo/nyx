@@ -13,6 +13,7 @@ class InstrumentQuery:
     centers: jnp.array
     hp_pixels: jnp.array
     hp_weight: jnp.array
+    weight: jnp.array
     grid: jnp.array
     values: jnp.array
     bandpass: jnp.array
@@ -192,7 +193,7 @@ class Scene:
                     flat_params = flat_params.at[start:end].set(param_value.flatten())
                     
         return flat_params
-    
+        
     def realize(self, parameters):
         """
         Realize the scene with given parameters.
@@ -231,10 +232,26 @@ class Scene:
             elif component_type == ComponentType.INSTRUMENT:
                 components['instrument'] = generated
         
+        # Add dummy emitters if lists are empty (for JAX compatibility)
+        if not components['diffuse']:
+            npix, n_wvl = components['atmosphere'].extinction.shape
+            dummy_diffuse = DiffuseQuery(flux_map=jnp.zeros((npix, n_wvl)))
+            components['diffuse'].append(dummy_diffuse)
+        
+        if not components['catalog']:
+            n_wvl = components['atmosphere'].tau.shape[0]
+            dummy_catalog = CatalogQuery(
+                sec_Z=jnp.zeros((1, 1)),
+                image_coords=jnp.zeros((1, 2)),
+                flux_values=jnp.zeros((1, n_wvl)),
+                flux_map=jnp.zeros((components['atmosphere'].extinction.shape[0], n_wvl))
+            )
+            components['catalog'].append(dummy_catalog)
+        
         # Create SceneComponents
         return SceneComponents(
-            diffuse=components['diffuse'] if components['diffuse'] else None,
-            catalog=components['catalog'] if components['catalog'] else None,
+            diffuse=components['diffuse'],
+            catalog=components['catalog'],
             instrument=components['instrument'],
             atmosphere=components['atmosphere']
         )

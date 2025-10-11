@@ -11,6 +11,8 @@ from nyx.core import get_wavelengths, get_healpix_nside
 from nyx.core import DiffuseQuery, ParameterSpec
 from nyx.core.model import EmitterProtocol
 
+from nyx.units import nixify
+
 class ESOSkyCalc(EmitterProtocol):
     def __init__(self):
         """
@@ -19,13 +21,13 @@ class ESOSkyCalc(EmitterProtocol):
         """
         ag_array = np.genfromtxt(ASSETS_PATH+'eso_skycalc_airglow_130sfu.dat')
         self.wvl = ag_array[:,0]*u.nm
-        self.flx = ag_array[:,1]/u.s/u.m**2/u.micron/u.arcsec**2
+        self.flx = ag_array[:,1]*u.ph/u.s/u.m**2/u.micron/u.arcsec**2
     
     def get_generator(self, observation):
         # Load relevant global parameters:
         wavelengths = get_wavelengths()
         nside = get_healpix_nside()
-        
+    
         # Pre-compute hemisphere grid:
         npix = hp.nside2npix(nside)
         theta, phi = hp.pix2ang(nside, np.arange(npix))
@@ -35,7 +37,7 @@ class ESOSkyCalc(EmitterProtocol):
         Z_vals = jnp.array(theta[mask])
 
         # Resample flux to wavelengths:
-        flx = SpectralHandler.resample(self.wvl, self.flx, wavelengths)
+        flx = SpectralHandler.resample(self.wvl, nixify(self.flx, 'radiance'), wavelengths)
         
         def generator(params):
             # Scaling with solar flux

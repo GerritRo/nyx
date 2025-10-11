@@ -57,6 +57,9 @@ class SingleScatteringAtmosphere(AtmosphereProtocol):
         sec_z = jnp.array(airmass(jnp.array(theta[mask])))
 
         YiXi = jnp.array(observation.get_eval_coordinates(altaz=False))
+
+        # Get scattering correction for hp area:
+        scat_corr = jnp.array(hp.nside2pixarea(nside))
         
         def generator(params):
             # Calculate optical depths (all dimensionless)
@@ -88,7 +91,7 @@ class SingleScatteringAtmosphere(AtmosphereProtocol):
                 YiXi=[YiXi, YiXi],
                 tau=tau_total,
                 extinction=extinction,
-                scattering=indicatrix * gradation
+                scattering=indicatrix * gradation * scat_corr
             )
         
         param_specs = {

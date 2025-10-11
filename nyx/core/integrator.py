@@ -12,6 +12,7 @@ def render(scene):
     # Indirect Scattering contribution
     scat_value = jnp.sum(scene.instrument.bandpass * (diff_sum + cat_diff) * scene.atmosphere.scattering, axis=(-2,-1))
     scat_rates = interpolate_pixel_rates(scene.atmosphere.YiXi[0], scene.atmosphere.YiXi[1], scat_value, scene.instrument.centers)
+    scat_rates = scat_rates * scene.instrument.weight
 
     # Direct diffuse contribution
     diff_value = jnp.sum(scene.instrument.bandpass * diff_sum * scene.atmosphere.extinction, axis=1)

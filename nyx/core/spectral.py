@@ -45,7 +45,7 @@ class SpectralHandler:
         if _config.get('spectral_resolution_warning'):
             res_in = jnp.median(jnp.diff(wavelengths_in))
             res_out = jnp.median(jnp.diff(wavelengths_out))
-            if res_out > 2 * res_in:
+            if res_out > 2 * res_in and (method != 'conserve'):
                 warnings.warn(
                     f"Spectral resolution degraded from {res_in:.1f} to {res_out:.1f} nm. "
                     "Consider using 'conserve' method to preserve features.",
