@@ -48,7 +48,7 @@ class Jones2013(EmitterProtocol):
 
         s = UnivariateSpline(self.rolo[:22, 0], np.asarray(res), k=2)
 
-        return omega_moon / np.pi * s(lam) * (384400 / moon_dist) ** 2
+        return omega_moon**2 / np.pi * s(lam) * (384400 / moon_dist) ** 2
 
     def get_generator(self, observation):
         # Load relevant global parameters:
@@ -74,7 +74,7 @@ class Jones2013(EmitterProtocol):
         
         # Get solar spectrum and normalize to moon:
         wvl, spectrum = SolarSpectrumRieke2008()
-        flx = nixify(spectrum*18*u.arcsec**2, 'flux', wavelength=wavelengths)
+        flx = nixify(spectrum, 'flux', wavelength=wavelengths)
         spec_samp = norm*SpectralHandler.resample(wvl.to(u.nm).value, flx, wavelengths)
 
         # Calculate airmass:
@@ -88,7 +88,7 @@ class Jones2013(EmitterProtocol):
         # Create flux map:
         flux_map = np.zeros((npix,len(wavelengths)))
         hp_ind = hp.ang2pix(nside, coord.spherical.lon.deg, coord.spherical.lat.deg, lonlat=True)
-        flux_map[hp_ind] = spec_samp / hp.nside2pixarea(nside)
+        flux_map[hp_ind] = spec_samp / hp.nside2pixarea(nside)**2
         
         def generator(params):
             return CatalogQuery(sec_Z=sec_Z, image_coords=i_coords, flux_values=spec_samp, flux_map=flux_map[mask])
