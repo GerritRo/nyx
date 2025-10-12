@@ -8,6 +8,16 @@ from .config import _config
 from typing import Optional, Callable
 from enum import Enum
 
+import numpy.lib.recfunctions as recfc
+import astropy.units as u
+import scipy.integrate as si
+from astropy.utils.data import download_file
+from astropy.io import fits, votable
+from scipy.interpolate import UnivariateSpline
+
+SVO_TABLE_URL = "http://svo2.cab.inta-csic.es/theory/fps/fps.php?ID="
+CALSPEC_URL = "https://archive.stsci.edu/hlsps/reference-atlases/cdbs/current_calspec/"
+
 class SpectralMethod(Enum):
     """Spectral interpolation methods"""
     LINEAR = 'linear'
@@ -102,3 +112,38 @@ class SpectralHandler:
             )
         
         return flux_out
+
+class Bandpass():
+    def __init__(self, wvl, transmission):
+        self.lam = wvl
+        self.trx = transmission
+
+        self.min = self.lam.min()
+        self.max = self.lam.max()
+
+        self.spline = UnivariateSpline(self.lam, self.trx, s=0, ext=1)
+        self.vegazero = self._calculate_vega_zero()
+
+    def __call__(self, lam):
+        return self.spline(lam.to(self.lam.unit))
+
+    def _calculate_vega_zero(self):
+        f_down = download_file(CALSPEC_URL+'alpha_lyr_stis_011.fits', cache=True)
+        hdul = fits.open(f_down)
+        wvl = hdul[1].data['WAVELENGTH']*u.angstrom
+        flx = hdul[1].data['FLUX']*u.erg/u.second/u.cm**2/u.angstrom
+
+        return si.simpson(x=wvl, y=wvl*self(wvl)*flx)*u.erg/u.second/u.cm**2
+
+    @classmethod
+    def from_SVO(cls, filter_id, cache=True):
+        f_down = download_file(SVO_TABLE_URL+filter_id, cache=cache)
+        table = votable.parse_single_table(f_down)
+        return cls(table.array.data['Wavelength']*u.angstrom, table.array.data['Transmission'])
+
+    @classmethod
+    def from_csv(cls, file):
+        arr = np.genfromtxt(file, delimiter=",", names=True)
+        lam = arr['wvl']*u.nm
+        trx = recfc.drop_fields(arr, "wvl", usemask=False)
+        return cls(lam, np.array(trx.tolist()).prod(axis=1))
