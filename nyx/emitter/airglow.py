@@ -35,6 +35,7 @@ class ESOSkyCalc(EmitterProtocol):
 
         # Write values to jax array:
         Z_vals = jnp.array(theta[mask])
+        height = jnp.array(observation.AltAz.location.height.to(u.km).value)
 
         # Resample flux to wavelengths:
         flx = SpectralHandler.resample(self.wvl, nixify(self.flx, 'radiance'), wavelengths)
@@ -43,11 +44,10 @@ class ESOSkyCalc(EmitterProtocol):
             # Scaling with solar flux
             sfu_val = (0.2 + 0.00614 * params['sfu'])
             # Scaling for zenith with van rhjin function
-            weight = 1 / (1 - (6738 / (6738 + params['obs_height_km']))**2 * jnp.sin(Z_vals) ** 2) ** 0.5
+            weight = 1 / (1 - (6738 / (6738 + height))**2 * jnp.sin(Z_vals) ** 2) ** 0.5
             return DiffuseQuery(flux_map=sfu_val*weight[:,None]*flx[None,:])
 
         param_specs = {
-            'obs_height_km': ParameterSpec((1,), 1.0, description="Observatory height [km]"),
             'sfu': ParameterSpec((1,), 100, description="Solar flux value [SFU]"),
         }
 

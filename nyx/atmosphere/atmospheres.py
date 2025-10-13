@@ -2,6 +2,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import healpy as hp
+import astropy.units as u
 
 from astropy.coordinates import SkyCoord
 from nyx.core.model import AtmosphereProtocol
@@ -60,11 +61,14 @@ class SingleScatteringAtmosphere(AtmosphereProtocol):
 
         # Get scattering correction for hp area:
         scat_corr = jnp.array(hp.nside2pixarea(nside))
+
+        # Get height:
+        height = jnp.array(observation.AltAz.location.height.to(u.km).value)
         
         def generator(params):
             # Calculate optical depths (all dimensionless)
-            tau_r = self.tau_rayleigh_func(wavelengths, params['obs_height_km'])
-            tau_m = self.tau_mie_func(wavelengths, params['obs_height_km'], 
+            tau_r = self.tau_rayleigh_func(wavelengths, height)
+            tau_m = self.tau_mie_func(wavelengths, height, 
                                      params['aod_500'], params['angstrom_exp'])
             tau_a = self.tau_absorption_func(wavelengths)
             
@@ -95,7 +99,6 @@ class SingleScatteringAtmosphere(AtmosphereProtocol):
             )
         
         param_specs = {
-            'obs_height_km': ParameterSpec((1,), 0.0, description="Observatory height [km]"),
             'aod_500': ParameterSpec((1,), 0.1, description="AOD at 500nm"),
             'angstrom_exp': ParameterSpec((1,), 1.0, description="Angstrom exponent"),
             'hg_asymmetry': ParameterSpec((1,), self.hg_asymmetry, 

@@ -56,13 +56,12 @@ class EffectiveApertureInstrument(InstrumentProtocol):
                 hp_weight=hp_weight,
                 weight=weight,
                 grid=grid + params['shift'][None,:,None],
-                values=pixel_values * params['flatfield'][:,None,None],
+                values=pixel_values,
                 bandpass=bp_values
             )
 
         param_specs={
             'shift': ParameterSpec((2,), jnp.zeros(2), description="Pixel shift in rad"),
-            'flatfield': ParameterSpec((960,), jnp.ones(960), description="Flatfielding values"),
         }
 
         return generator, param_specs
