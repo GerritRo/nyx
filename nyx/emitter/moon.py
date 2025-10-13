@@ -74,9 +74,8 @@ class Jones2013(EmitterProtocol):
         
         # Get solar spectrum and normalize to moon:
         wvl, spectrum = SolarSpectrumRieke2008()
-        flx = nixify(spectrum, 'flux', wavelength=wavelengths)
+        flx = nixify(spectrum, 'flux', wavelength=wvl)
         spec_samp = norm*SpectralHandler.resample(wvl.to(u.nm).value, flx, wavelengths)
-
         # Calculate airmass:
         airmass = get_airmass_formula()
         sec_Z = jnp.array(airmass(jnp.array(np.pi/2 - coord.alt.rad))).reshape(1,1)
