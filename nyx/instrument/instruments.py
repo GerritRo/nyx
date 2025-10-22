@@ -57,10 +57,11 @@ class EffectiveApertureInstrument(InstrumentProtocol):
                 weight=weight,
                 grid=grid + params['shift'][None,:,None],
                 values=pixel_values,
-                bandpass=bp_values
+                bandpass=bp_values * params['eff']
             )
 
         param_specs={
+            'eff': ParameterSpec((1,), 1, description="Telescope efficiency"),
             'shift': ParameterSpec((2,), jnp.zeros(2), description="Pixel shift in rad"),
         }
 

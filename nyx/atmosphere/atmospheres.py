@@ -30,7 +30,7 @@ class SingleScatteringAtmosphere(AtmosphereProtocol):
         """
         self.tau_rayleigh_func = tau_rayleigh_func
         self.tau_mie_func = tau_mie_func
-        self.tau_absorption_func = tau_absorption_func or (lambda wl: np.zeros_like(wl))
+        self.tau_absorption_func = tau_absorption_func
         self.hg_asymmetry = hg_asymmetry
         
     def get_generator(self, observation):
@@ -70,7 +70,7 @@ class SingleScatteringAtmosphere(AtmosphereProtocol):
             tau_r = self.tau_rayleigh_func(wavelengths, height)
             tau_m = self.tau_mie_func(wavelengths, height, 
                                      params['aod_500'], params['angstrom_exp'])
-            tau_a = self.tau_absorption_func(wavelengths)
+            tau_a = self.tau_absorption_func(wavelengths, height)
             
             tau_total = tau_r + tau_m + tau_a
             
@@ -99,7 +99,7 @@ class SingleScatteringAtmosphere(AtmosphereProtocol):
             )
         
         param_specs = {
-            'aod_500': ParameterSpec((1,), 0.1, description="AOD at 500nm"),
+            'aod_500': ParameterSpec((1,), 0.5, description="AOD at 500nm"),
             'angstrom_exp': ParameterSpec((1,), 1.0, description="Angstrom exponent"),
             'hg_asymmetry': ParameterSpec((1,), self.hg_asymmetry, 
                                          description="HG asymmetry", bounds=(0, 1))
