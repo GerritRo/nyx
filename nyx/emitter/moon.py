@@ -78,7 +78,12 @@ class Jones2013(EmitterProtocol):
         spec_samp = norm*SpectralHandler.resample(wvl.to(u.nm).value, flx, wavelengths)
         # Calculate airmass:
         airmass = get_airmass_formula()
-        sec_Z = jnp.array(airmass(jnp.array(np.pi/2 - coord.alt.rad))).reshape(1,1)
+
+        if coord.alt.rad < 0:
+            spec_samp = spec_samp * 0
+            sec_Z = jnp.array([1]).reshape(1,1)
+        else:
+            sec_Z = jnp.array(airmass(jnp.array(np.pi/2 - coord.alt.rad))).reshape(1,1)
 
         # Determine image coordinate:
         i_coords = coord.transform_to(observation.frame)

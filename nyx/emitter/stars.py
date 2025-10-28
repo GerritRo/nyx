@@ -34,7 +34,7 @@ class GaiaDR3(EmitterProtocol):
 
         # Create color grid
         rp_bp = self.catalog['phot_rp_mean_mag'] - self.catalog['phot_bp_mean_mag']
-        spec_grid = create_color_grid(G, (RP, BP), [np.nanmin(rp_bp), np.nanmax(rp_bp)], PicklesTRDSAtlas1998())
+        spec_grid = create_color_grid(G, (RP, BP), [np.nanmin(rp_bp), 0.5], PicklesTRDSAtlas1998())
 
         # Get median as spectrum for now:
         self.points = spec_grid.points
@@ -85,10 +85,10 @@ class GaiaDR3(EmitterProtocol):
 
         # Calculate flux of stars in view:
         new_samp = SpectralHandler.resample(self.wvl, self.flx, wavelengths)
-        interpol = RegularGridInterpolator((self.points), new_samp, method='linear', bounds_error=False)
+        interpol = RegularGridInterpolator((self.points), new_samp, method='linear', fill_value=0)
         rp_bp = fov_stars['phot_rp_mean_mag'] - fov_stars['phot_bp_mean_mag']
         rp_bp[~np.isfinite(rp_bp)] = np.nanmedian(rp_bp)
-        rp_bp = jnp.array(rp_bp)
+        rp_bp = jnp.clip(jnp.array(rp_bp), a_max=0.49) # Clip to avoid illegal values
         flux_values = 10**(-0.4*fov_stars['phot_g_mean_mag'])[:,None]*interpol(rp_bp)
 
         # Create (empty) map for now:
