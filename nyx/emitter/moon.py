@@ -6,7 +6,6 @@ import numpy as np
 import healpy as hp
 import astropy
 import astropy.units as u
-from astropy.constants import c, h
 from scipy.interpolate import UnivariateSpline
 
 from nyx.core import SpectralHandler

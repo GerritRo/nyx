@@ -1,7 +1,3 @@
-"""
-Nyx Units Package
-"""
-
 from .specification import (
     # Flux units
     RADIANCE,
@@ -45,8 +41,6 @@ from .converter import (
 
 __all__ = [
     # Specification
-    'DIFFUSE_FLUX',
-    'POINT_FLUX',
     'WAVELENGTH',
     'FREQUENCY',
     'ANGLE',
@@ -57,7 +51,6 @@ __all__ = [
     'TRANSMISSION',
     'EFFECTIVE_AREA',
     'RATE',
-    'COUNT_RATE',
     'SPEED_OF_LIGHT',
     'PLANCK_CONSTANT',
     'UNIT_REGISTRY',

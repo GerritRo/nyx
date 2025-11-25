@@ -8,7 +8,6 @@ from .integrator import render
 from .model import Observation
 
 __all__ = [
-    "CoordinateQuery",
     "InstrumentQuery",
     "AtmosphereQuery",
     "DiffuseQuery",

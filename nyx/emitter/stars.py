@@ -3,7 +3,6 @@ import numpy as np
 import healpy as hp
 import astropy.units as u
 from astropy.coordinates import SkyCoord
-from astropy.constants import c, h, k_B
 from astropy.utils.data import download_file
 from sklearn.neighbors import BallTree
 from jax.scipy.interpolate import RegularGridInterpolator

@@ -5,7 +5,6 @@ import numpy as np
 import healpy as hp
 import astropy.units as u
 from astropy.coordinates import SkyCoord
-from astropy.constants import c, h
 
 from scipy.interpolate import RegularGridInterpolator
 

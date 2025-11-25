@@ -2,20 +2,6 @@ import astropy.units as u
 from astropy.coordinates import FunctionTransform, BaseCoordinateFrame, RepresentationMapping, frame_transform_graph
 from astropy.coordinates import SphericalRepresentation, GeocentricTrueEcliptic, TimeAttribute, get_body
 
-def haversine(delta_lon, lat1, lat2):
-    """
-    The haversine function.
-    """
-    delta_lat = lat1 - lat2
-    sin_delta_lat = np.sin(delta_lat / 2) ** 2
-    sin_sum_lat = np.sin((lat1 + lat2) / 2) ** 2
-    sin_delta_lon = np.sin(delta_lon / 2) ** 2
-
-    return 2 * np.arcsin(
-        np.sqrt(sin_delta_lat + (1 - sin_delta_lat - sin_sum_lat) * sin_delta_lon)
-    )
-
-
 class SunRelativeEclipticFrame(BaseCoordinateFrame):
     default_representation = SphericalRepresentation
 

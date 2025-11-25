@@ -1,7 +1,3 @@
-"""
-Unit Specification for Nyx
-"""
-
 import astropy.units as u
 
 # =============================================================================
