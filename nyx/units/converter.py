@@ -152,16 +152,6 @@ def nixify(value: Union[float, np.ndarray, u.Quantity],
     -------
     jnp.ndarray or (np.ndarray, u.Unit)
         Converted value as JAX array, or (value, unit) tuple if return_jax=False
-        
-    Examples
-    --------
-    >>> # Direct to JAX (default)
-    >>> jax_val = convert_to_internal(500*u.nm, 'wavelength')
-    >>> 
-    >>> # With energy flux (needs wavelength)
-    >>> wl = np.linspace(300, 700, 50) * u.nm
-    >>> flux = 1e-8 * u.W/u.m**2/u.micron/u.sr
-    >>> jax_flux = convert_to_internal(flux, 'radiance', wavelength=wl)
     """
     converter = NyxUnit(value, current_unit, wavelength)
     converted = converter.to_internal(unit_type)
