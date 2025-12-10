@@ -55,8 +55,6 @@ def compute_pixel_weights(centers, values_stack, coords, rates):
 
 @jit
 def interpolate_pixel_rates(Xi, Yi, values, coords):
-    """
-    """
     height, width = values.shape
     
     ystart, ystep = Yi[0], Yi[1] - Yi[0]

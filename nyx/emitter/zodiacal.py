@@ -9,12 +9,12 @@ from astropy.coordinates import SkyCoord
 from scipy.interpolate import RegularGridInterpolator
 
 from nyx.core.scene import ComponentType
-from nyx.utils.spectra import SolarSpectrumRieke2008
+from nyx.core import Spectrum
 from nyx.core import SunRelativeEclipticFrame
 from nyx.core import get_wavelengths, get_healpix_nside
 from nyx.core import DiffuseQuery, ParameterSpec
 from nyx.core.model import EmitterProtocol
-from nyx.units import nixify
+from nyx.units import Radiance
 
 class Leinert1998(EmitterProtocol):
     def __init__(self):
@@ -47,14 +47,12 @@ class Leinert1998(EmitterProtocol):
         lon, lat = hp_coords.alpha.rad, hp_coords.beta.rad
         weights = self.A(np.abs(np.asarray([(lon + np.pi) % (2 * np.pi) - np.pi, lat]).T)) * 1e-8 * u.W/u.m**2/u.sr/u.micron
         
-        # Get solar spectrum:
-        wvl, spectrum = SolarSpectrumRieke2008()
-        value_500nm = np.interp(0.5*u.micron, wvl, spectrum)
-        spec_samp = np.interp(wavelengths*u.nm, wvl, spectrum)/value_500nm
-        spectra = spec_samp*self.color_correction(wavelengths, np.clip(np.rad2deg(lat), 30, 90))
+        # Get solar spectrum (normalized at 500nm, flux-conserving resampling):
+        spec_samp = Spectrum.from_solar().normalize_at(500.0).resample(wavelengths).flux
+        spectra = spec_samp * self.color_correction(wavelengths, np.clip(np.rad2deg(lat), 30, 90))
 
         # Combined and transform:
-        flux_map = nixify((weights[:,None]*spectra.value), 'radiance', wavelength=wavelengths)
+        flux_map = Radiance(weights[:,None]*spectra, wavelength=wavelengths*u.nm).value
         
         def generator(params):
             return DiffuseQuery(flux_map=flux_map)

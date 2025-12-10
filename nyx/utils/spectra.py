@@ -9,14 +9,10 @@ from astropy.constants import c, h
 from nyx.core.spectral import SpectralGrid
 from astropy.utils.data import download_file
 from astropy.io import fits
+import astropy.units as u
 
 import scipy.integrate as si
 from scipy.interpolate import RegularGridInterpolator
-
-
-import astropy.units as u
-from astropy.utils.data import download_file
-from astropy.io import fits
 
 def PicklesTRDSAtlas1998():
     file = np.genfromtxt(ASSETS_PATH+'pickles1998_trds_atlas.dat')    

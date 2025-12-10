@@ -4,7 +4,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from enum import Enum
-from dataclasses import dataclass, field
+from dataclasses import field
 from typing import Dict, Any, List, Callable, NamedTuple, Optional, Union
 
 

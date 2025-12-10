@@ -27,7 +27,7 @@ class Observation:
         self.target = target.transform_to(self.AltAz)
         self.frame = self.target.skyoffset_frame(rotation=rotation)
         
-        if fov != None:
+        if fov is not None:
             self.fov = fov.to(u.radian)
         else:
             self.fov = None

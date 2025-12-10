@@ -74,11 +74,6 @@ class GlobalConfig:
                      validator=lambda x: x > 0 and (x & (x-1)) == 0,  # Power of 2
                      description="HEALPix nside parameter")
         
-        # Hemisphere mask
-        self.register('use_hemisphere',
-                     default=True,
-                     description="Whether to use only upper hemisphere")
-        
         # Atmospheric configuration
         self.register('airmass_formula',
                      default='kasten_young_1989',
@@ -102,17 +97,12 @@ class GlobalConfig:
         # Spectral handling
         self.register('spectral_method',
                      default='conserve',
-                     validator=lambda x: x in ['linear', 'conserve', 'drizzle', 'cubic'],
+                     validator=lambda x: x in ['linear', 'conserve'],
                      description="Spectral interpolation method")
         
         self.register('spectral_resolution_warning',
                      default=True,
                      description="Warn when spectral resolution is degraded")
-        
-        # Optimization
-        self.register('gradient_checkpointing',
-                     default=False,
-                     description="Use gradient checkpointing to save memory")
         
     def register(self, name: str, default: Any, validator: Optional[Callable] = None,
                 description: str = "", immutable: bool = False):
@@ -206,7 +196,7 @@ def set_grid_dim(dim: int):
 
 
 def get_grid_dim() -> int:
-    """Set the interpolation grid fineness parameter"""
+    """Get the interpolation grid fineness parameter"""
     return _config.get('grid_dim')
 
 

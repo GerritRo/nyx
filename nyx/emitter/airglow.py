@@ -6,12 +6,12 @@ import healpy as hp
 import astropy.units as u
 
 from nyx.core.scene import ComponentType
-from nyx.core import SpectralHandler
+from nyx.core import Spectrum
 from nyx.core import get_wavelengths, get_healpix_nside
 from nyx.core import DiffuseQuery, ParameterSpec
 from nyx.core.model import EmitterProtocol
 
-from nyx.units import nixify
+from nyx.units import Radiance
 
 class ESOSkyCalc(EmitterProtocol):
     def __init__(self):
@@ -38,7 +38,7 @@ class ESOSkyCalc(EmitterProtocol):
         height = jnp.array(observation.AltAz.location.height.to(u.km).value)
 
         # Resample flux to wavelengths:
-        flx = SpectralHandler.resample(self.wvl, nixify(self.flx, 'radiance'), wavelengths)
+        flx = Spectrum.from_arrays(self.wvl, Radiance(self.flx).value).resample(wavelengths).flux
         
         def generator(params):
             # Scaling with solar flux

@@ -1,2 +1,2 @@
 import os
-ASSETS_PATH = os.path.dirname(__file__) + '/data/'
+ASSETS_PATH = os.path.join(os.path.dirname(__file__), 'data/')

@@ -13,4 +13,8 @@ def henyey_greenstein_phase(theta, g):
 def gradation_function(tau, sec_Z, sec_z):
     sec_diff = sec_Z/(sec_z - sec_Z)
     exp_diff = (jax.numpy.exp(-tau*sec_Z) - jax.numpy.exp(-tau*sec_z))
-    return sec_diff * exp_diff
+    # Switch for cases where sec_z == secZ
+    res_val = jax.numpy.where(sec_z != sec_Z, 
+                        sec_diff * exp_diff, 
+                        tau*sec_Z*jax.numpy.exp(-tau*sec_Z))
+    return res_val

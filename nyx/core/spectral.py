@@ -1,8 +1,9 @@
 import warnings
 import jax.numpy as jnp
 import numpy as np
+import equinox as eqx
 from .config import _config
-from typing import Optional, Callable
+from typing import Optional, Union
 from enum import Enum
 from dataclasses import dataclass
 
@@ -13,123 +14,222 @@ from astropy.utils.data import download_file
 from astropy.io import fits, votable
 from scipy.interpolate import UnivariateSpline, RegularGridInterpolator
 
-SVO_TABLE_URL = "http://svo2.cab.inta-csic.es/theory/fps/fps.php?ID="
+SVO_TABLE_URL = "https://svo2.cab.inta-csic.es/theory/fps/fps.php?ID="
 CALSPEC_URL = "https://archive.stsci.edu/hlsps/reference-atlases/cdbs/current_calspec/"
+SOLAR_SPECTRUM_URL = "https://archive.stsci.edu/hlsps/reference-atlases/cdbs/grid/solsys/solar_spec.fits"
 
 
 class SpectralMethod(Enum):
     """Spectral interpolation methods"""
     LINEAR = 'linear'
     CONSERVE = 'conserve'
-    DRIZZLE = 'drizzle'
-    CUBIC = 'cubic'
 
 
-class SpectralHandler:
-    """Handler for spectral interpolation and resampling"""
-    
-    @staticmethod
-    def resample(wavelengths_in: jnp.ndarray, 
-                 flux_in: jnp.ndarray,
-                 wavelengths_out: jnp.ndarray,
-                 method: Optional[str] = None) -> jnp.ndarray:
+class Spectrum(eqx.Module):
+    """
+    Immutable container for spectral data with wavelengths and flux.
+
+    This class uses equinox.Module for JAX compatibility, allowing it to be
+    used with jit, vmap, grad, and other JAX transformations.
+
+    Parameters
+    ----------
+    wavelengths : array, shape (M,)
+        Wavelength grid (should be in consistent units, typically nm)
+    flux : array, shape (M,) or (N, M)
+        Flux values - single spectrum or batch of N spectra
+    method : str, optional
+        Default resampling method for this spectrum ('linear' or 'conserve')
+
+    Examples
+    --------
+    >>> spec = Spectrum.from_solar()
+    >>> resampled = spec.normalize_at(500.0).resample(wavelengths)
+    """
+    wavelengths: jnp.ndarray
+    flux: jnp.ndarray
+    method: str = eqx.field(static=True, default='conserve')
+
+    def resample(self, wavelengths_out: jnp.ndarray,
+                 method: Optional[str] = None) -> 'Spectrum':
         """
-        Resample spectrum(s) to new wavelength grid
-        
+        Resample this spectrum to a new wavelength grid.
+
         Parameters
         ----------
-        wavelengths_in : array, shape (M,)
-            Input wavelength grid
-        flux_in : array, shape (M,) or (N, M)
-            Input flux values (single or multiple spectra)
         wavelengths_out : array, shape (K,)
-            Output wavelength grid
+            Target wavelength grid
         method : str, optional
-            Resampling method (uses global config if None)
-        
+            Resampling method ('linear' or 'conserve').
+            If None, uses this spectrum's default method.
+
         Returns
         -------
-        flux_out : array, shape (K,) or (N, K)
-            Resampled flux values
+        Spectrum
+            New spectrum resampled to wavelengths_out
         """
         if method is None:
-            method = _config.get('spectral_method')
-            
+            method = self.method
+
         # Check for resolution degradation
         if _config.get('spectral_resolution_warning'):
-            res_in = jnp.median(jnp.diff(wavelengths_in))
+            res_in = jnp.median(jnp.diff(self.wavelengths))
             res_out = jnp.median(jnp.diff(wavelengths_out))
-            if res_out > 2 * res_in and (method != 'conserve'):
+            if res_out > 2 * res_in and method != 'conserve':
                 warnings.warn(
                     f"Spectral resolution degraded from {res_in:.1f} to {res_out:.1f} nm. "
                     "Consider using 'conserve' method to preserve features.",
                     UserWarning
                 )
-        
+
         if method == 'linear':
-            return SpectralHandler._linear_interp(wavelengths_in, flux_in, wavelengths_out)
+            new_flux = _linear_interp(self.wavelengths, self.flux, wavelengths_out)
         elif method == 'conserve':
-            return SpectralHandler._conserve_interp(wavelengths_in, flux_in, wavelengths_out)
+            new_flux = _conserve_interp(self.wavelengths, self.flux, wavelengths_out)
         else:
             raise ValueError(f"Unknown spectral method: {method}")
-    
-    @staticmethod
-    def _linear_interp(wl_in, flux_in, wl_out):
-        """Simple linear interpolation, vectorized for multiple spectra"""
-        if flux_in.ndim == 1:
-            return jnp.interp(wl_out, wl_in, flux_in)
-        elif flux_in.ndim == 2:
-            # Vectorize along the first axis (N spectra)
-            return jnp.stack(
-                [jnp.interp(wl_out, wl_in, f) for f in flux_in],
-                axis=0
-            )
-        else:
-            raise ValueError("flux_in must be 1D or 2D")
-            
-    @staticmethod
-    def _conserve_interp(wl_in, flux_in, wl_out):
-        """
-        Vectorized, flux-conserving interpolation in JAX.
-        Supports batched flux arrays of shape (N_spec, N_in).
-        """
-        def get_edges(wl):
-            edges = jnp.zeros(len(wl) + 1)
-            edges = edges.at[1:-1].set((wl[1:] + wl[:-1]) / 2)
-            edges = edges.at[0].set(wl[0] - (wl[1] - wl[0]) / 2)
-            edges = edges.at[-1].set(wl[-1] + (wl[-1] - wl[-2]) / 2)
-            return edges
-    
-        edges_in = get_edges(wl_in)
-        edges_out = get_edges(wl_out)
-    
-        Δλ_in = edges_in[1:] - edges_in[:-1]         # (N_in,)
-        Δλ_out = edges_out[1:] - edges_out[:-1]      # (N_out,)
-    
-        # Compute all pairwise overlaps [N_out, N_in]
-        overlap_lo = jnp.maximum(edges_out[:-1, None], edges_in[None, :-1])
-        overlap_hi = jnp.minimum(edges_out[1:, None], edges_in[None, 1:])
-        overlap = jnp.clip(overlap_hi - overlap_lo, 0, None)
-    
-        # Fraction of each input bin that overlaps each output bin
-        frac = overlap / Δλ_in[None, :]              # (N_out, N_in)
-    
-        # Handle both 1D and 2D flux_in
-        if flux_in.ndim == 1:
-            flux_in = flux_in[None, :]               # (1, N_in)
-    
-        # Multiply: (N_spec, N_in) * (N_out, N_in) -> broadcast to (N_spec, N_out, N_in)
-        weighted = flux_in[:, None, :] * frac[None, :, :] * Δλ_in[None, None, :]
-    
-        # Integrate over input bins → (N_spec, N_out)
-        flux_out = jnp.sum(weighted, axis=-1) / Δλ_out[None, :]
-    
-        # If only one spectrum, return 1D array
-        if flux_out.shape[0] == 1:
-            flux_out = flux_out[0]
-    
-        return flux_out
 
+        return Spectrum(
+            wavelengths=wavelengths_out,
+            flux=new_flux,
+            method=self.method
+        )
+
+    def normalize_at(self, wavelength: float) -> 'Spectrum':
+        """
+        Normalize this spectrum to unity at a given wavelength.
+
+        Parameters
+        ----------
+        wavelength : float
+            Wavelength at which to normalize (same units as self.wavelengths)
+
+        Returns
+        -------
+        Spectrum
+            New spectrum with flux normalized to 1.0 at the given wavelength
+        """
+        ref_value = jnp.interp(wavelength, self.wavelengths, self.flux)
+        return Spectrum(
+            wavelengths=self.wavelengths,
+            flux=self.flux / ref_value,
+            method=self.method
+        )
+
+    @classmethod
+    def from_arrays(cls, wavelengths: jnp.ndarray, flux: jnp.ndarray,
+                    method: str = 'conserve') -> 'Spectrum':
+        """
+        Create a Spectrum from wavelength and flux arrays.
+
+        Parameters
+        ----------
+        wavelengths : array-like
+            Wavelength values (units stripped if present)
+        flux : array-like
+            Flux values (units stripped if present)
+        method : str, optional
+            Default resampling method
+
+        Returns
+        -------
+        Spectrum
+            New Spectrum instance
+        """
+        # Handle astropy units
+        if hasattr(wavelengths, 'value'):
+            wavelengths = wavelengths.value
+        if hasattr(flux, 'value'):
+            flux = flux.value
+
+        return cls(
+            wavelengths=jnp.asarray(wavelengths),
+            flux=jnp.asarray(flux),
+            method=method
+        )
+
+    @classmethod
+    def from_solar(cls, method: str = 'conserve') -> 'Spectrum':
+        """
+        Load the standard solar spectrum (Rieke 2008).
+
+        Returns wavelengths in nm and flux in internal units.
+
+        Returns
+        -------
+        Spectrum
+            Solar spectrum instance
+        """
+        f_down = download_file(SOLAR_SPECTRUM_URL, cache=True)
+        with fits.open(f_down) as hdul:
+            wvl = np.ascontiguousarray(hdul[1].data['WAVELENGTH'] / 10.0, dtype=np.float64)
+            flx = np.ascontiguousarray(hdul[1].data['FLUX'], dtype=np.float64)
+        return cls(
+            wavelengths=jnp.asarray(wvl),
+            flux=jnp.asarray(flx),
+            method=method
+        )
+
+def _linear_interp(wl_in: jnp.ndarray, flux_in: jnp.ndarray,
+                   wl_out: jnp.ndarray) -> jnp.ndarray:
+    """Simple linear interpolation, vectorized for multiple spectra."""
+    if flux_in.ndim == 1:
+        return jnp.interp(wl_out, wl_in, flux_in)
+    elif flux_in.ndim == 2:
+        # Vectorize along the first axis (N spectra)
+        return jnp.stack(
+            [jnp.interp(wl_out, wl_in, f) for f in flux_in],
+            axis=0
+        )
+    else:
+        raise ValueError("flux_in must be 1D or 2D")
+
+
+def _conserve_interp(wl_in: jnp.ndarray, flux_in: jnp.ndarray,
+                     wl_out: jnp.ndarray) -> jnp.ndarray:
+    """
+    Flux-conserving interpolation in JAX.
+
+    Supports batched flux arrays of shape (N_spec, N_in).
+    Preserves integrated flux when rebinning to coarser resolution.
+    """
+    def get_edges(wl):
+        edges = jnp.zeros(len(wl) + 1)
+        edges = edges.at[1:-1].set((wl[1:] + wl[:-1]) / 2)
+        edges = edges.at[0].set(wl[0] - (wl[1] - wl[0]) / 2)
+        edges = edges.at[-1].set(wl[-1] + (wl[-1] - wl[-2]) / 2)
+        return edges
+
+    edges_in = get_edges(wl_in)
+    edges_out = get_edges(wl_out)
+
+    delta_in = edges_in[1:] - edges_in[:-1]      # (N_in,)
+    delta_out = edges_out[1:] - edges_out[:-1]   # (N_out,)
+
+    # Compute all pairwise overlaps [N_out, N_in]
+    overlap_lo = jnp.maximum(edges_out[:-1, None], edges_in[None, :-1])
+    overlap_hi = jnp.minimum(edges_out[1:, None], edges_in[None, 1:])
+    overlap = jnp.clip(overlap_hi - overlap_lo, 0, None)
+
+    # Fraction of each input bin that overlaps each output bin
+    frac = overlap / delta_in[None, :]           # (N_out, N_in)
+
+    # Handle both 1D and 2D flux_in
+    was_1d = flux_in.ndim == 1
+    if was_1d:
+        flux_in = flux_in[None, :]               # (1, N_in)
+
+    # Multiply: (N_spec, N_in) * (N_out, N_in) -> broadcast to (N_spec, N_out, N_in)
+    weighted = flux_in[:, None, :] * frac[None, :, :] * delta_in[None, None, :]
+
+    # Integrate over input bins -> (N_spec, N_out)
+    flux_out = jnp.sum(weighted, axis=-1) / delta_out[None, :]
+
+    # If only one spectrum, return 1D array
+    if was_1d:
+        flux_out = flux_out[0]
+
+    return flux_out
 
 
 class Bandpass():
@@ -180,7 +280,7 @@ class SpectralGrid:
         else:
             rgi = RegularGridInterpolator(self.points, self.flx, bounds_error=False)
             return rgi(xi)*self.flx.unit
-    
+
     def apply_bandpass(self, bandpass):
         mask = (self.wvl>=bandpass.min)&(self.wvl<=bandpass.max)
 

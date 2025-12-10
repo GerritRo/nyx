@@ -70,7 +70,7 @@ class SingleScatteringAtmosphere(AtmosphereProtocol):
             tau_r = self.tau_rayleigh_func(wavelengths, height)
             tau_m = self.tau_mie_func(wavelengths, height, 
                                      params['aod_500'], params['angstrom_exp'])
-            tau_a = self.tau_absorption_func(wavelengths, height)
+            tau_a = self.tau_absorption_func(wavelengths, height) if self.tau_absorption_func else 0
             
             tau_total = tau_r + tau_m + tau_a
             

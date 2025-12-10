@@ -8,14 +8,14 @@ import astropy
 import astropy.units as u
 from scipy.interpolate import UnivariateSpline
 
-from nyx.core import SpectralHandler
+from nyx.core import Spectrum
 from nyx.core.scene import ComponentType
 from nyx.core import get_wavelengths, get_healpix_nside
 from nyx.core import CatalogQuery, ParameterSpec
 from nyx.core.model import EmitterProtocol
 from nyx.atmosphere import get_airmass_formula
 
-from nyx.units import nixify
+from nyx.units import Wavelength, Flux
 
 class Jones2013(EmitterProtocol):
     def __init__(self):
@@ -73,8 +73,8 @@ class Jones2013(EmitterProtocol):
         
         # Get solar spectrum and normalize to moon:
         wvl, spectrum = SolarSpectrumRieke2008()
-        flx = nixify(spectrum, 'flux', wavelength=wvl)
-        spec_samp = norm*SpectralHandler.resample(wvl.to(u.nm).value, flx, wavelengths)
+        flx = Flux(spectrum, wavelength=wvl).value
+        spec_samp = norm * Spectrum.from_arrays(wvl.to(u.nm).value, flx).resample(wavelengths).flux
         # Calculate airmass:
         airmass = get_airmass_formula()
 

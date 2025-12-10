@@ -22,6 +22,8 @@ dependencies = [
     "astropy",
     "healpy",
     "dust_extinction",
+    "jax",
+    "equinox",
 ]
 
 dynamic = ["version"]

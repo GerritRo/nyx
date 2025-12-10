@@ -3,7 +3,7 @@ from .config import _config, config_context, config_summary
 from .coordinates import SunRelativeEclipticFrame
 from .scene import InstrumentQuery, AtmosphereQuery, DiffuseQuery, CatalogQuery
 from .scene import SceneComponents, ComponentType, ParameterSpec, Scene
-from .spectral import SpectralHandler
+from .spectral import Spectrum
 from .integrator import render
 from .model import Observation
 
@@ -16,5 +16,6 @@ __all__ = [
     "ComponentType",
     "ParameterSpec",
     "Scene",
-    "render"
+    "render",
+    "Spectrum",
 ]

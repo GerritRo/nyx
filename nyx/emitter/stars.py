@@ -13,8 +13,9 @@ from nyx.core import CatalogQuery, ParameterSpec
 from nyx.core.model import EmitterProtocol
 from nyx.atmosphere import get_airmass_formula
 
-from nyx.units import nixify
-from nyx.core.spectral import Bandpass, SpectralHandler
+from nyx.units import Wavelength, Flux
+from nyx.core.spectral import Bandpass
+from nyx.core import Spectrum
 from nyx.utils.spectra import create_color_grid, PicklesTRDSAtlas1998
 
 class GaiaDR3(EmitterProtocol):   
@@ -37,8 +38,8 @@ class GaiaDR3(EmitterProtocol):
 
         # Get median as spectrum for now:
         self.points = spec_grid.points
-        self.wvl = nixify(spec_grid.wvl, 'wavelength')
-        self.flx = nixify(np.nanmedian(spec_grid.flx, axis=-1)*u.ph, 'flux', wavelength=spec_grid.wvl)
+        self.wvl = Wavelength(spec_grid.wvl).value
+        self.flx = Flux(np.nanmedian(spec_grid.flx, axis=-1)*u.ph, wavelength=spec_grid.wvl).value
         
         # Build spatial index for efficient queries
         self.build_balltree()
@@ -83,7 +84,7 @@ class GaiaDR3(EmitterProtocol):
         ])
 
         # Calculate flux of stars in view:
-        new_samp = SpectralHandler.resample(self.wvl, self.flx, wavelengths)
+        new_samp = Spectrum.from_arrays(self.wvl, self.flx).resample(wavelengths).flux
         interpol = RegularGridInterpolator((self.points), new_samp, method='linear', fill_value=0)
         rp_bp = fov_stars['phot_rp_mean_mag'] - fov_stars['phot_bp_mean_mag']
         rp_bp[~np.isfinite(rp_bp)] = np.nanmedian(rp_bp)

@@ -16,6 +16,9 @@ FLUX = u.photon / (u.s * u.m**2 * u.nm)
 FLUX_NAME = "photon/s/m²/nm"
 FLUX_DESCRIPTION = "Photon flux per unit area and wavelength"
 
+# Energy flux
+# Used for stars, catalog sources
+
 # =============================================================================
 # SPECTRAL UNITS
 # =============================================================================
