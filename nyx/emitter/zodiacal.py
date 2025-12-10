@@ -15,6 +15,8 @@ from nyx.core import get_wavelengths, get_healpix_nside
 from nyx.core import DiffuseQuery, ParameterSpec
 from nyx.core.model import EmitterProtocol
 from nyx.units import Radiance
+from nyx.units.specification import RADIANCE
+from astropy.constants import c, h
 
 class Leinert1998(EmitterProtocol):
     def __init__(self):
@@ -51,8 +53,14 @@ class Leinert1998(EmitterProtocol):
         spec_samp = Spectrum.from_solar().normalize_at(500.0).resample(wavelengths).flux
         spectra = spec_samp * self.color_correction(wavelengths, np.clip(np.rad2deg(lat), 30, 90))
 
-        # Combined and transform:
-        flux_map = Radiance(weights[:,None]*spectra, wavelength=wavelengths*u.nm).value
+        # Combine weights and spectra (energy radiance), then convert to photon radiance
+        energy_radiance = weights[:,None] * spectra
+        # Convert energy radiance to photon radiance: photon_flux = energy_flux / (h*c/λ)
+        wvl_quantity = wavelengths * u.nm
+        photon_energy = (h * c / wvl_quantity).to(u.J)
+        energy_radiance_normalized = energy_radiance.to(u.W / u.m**2 / u.nm / u.sr)
+        photon_radiance = energy_radiance_normalized / photon_energy
+        flux_map = (photon_radiance * u.ph).to(RADIANCE).value
         
         def generator(params):
             return DiffuseQuery(flux_map=flux_map)

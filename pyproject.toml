@@ -20,7 +20,7 @@ dependencies = [
     "scikit-learn",
     "scipy",
     "astropy",
-    "healpy",
+    "jax-healpy",
     "dust_extinction",
     "jax",
     "equinox",

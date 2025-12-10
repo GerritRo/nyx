@@ -11,8 +11,8 @@ from typing import Dict, Any, List, Callable, NamedTuple, Optional, Union
 @chex.dataclass
 class InstrumentQuery:
     centers: jnp.array
-    hp_pixels: jnp.array
-    hp_weight: jnp.array
+    hp_theta: jnp.array
+    hp_phi: jnp.array
     weight: jnp.array
     grid: jnp.array
     values: jnp.array

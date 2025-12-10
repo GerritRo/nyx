@@ -1,11 +1,10 @@
 import jax.numpy as jnp
 import numpy as np
-import healpy as hp
 from scipy.integrate import simpson as simps
 import astropy.units as u
 from astropy.coordinates import SkyCoord
 
-from nyx.core import get_wavelengths, get_healpix_nside
+from nyx.core import get_wavelengths
 from nyx.core import InstrumentQuery, ParameterSpec
 from nyx.core.model import InstrumentProtocol
 
@@ -31,11 +30,11 @@ class EffectiveApertureInstrument(InstrumentProtocol):
         """
         # Load relevant global parameters:
         wavelengths = get_wavelengths()
-        nside = get_healpix_nside()
-        
-        # Determine the healpix interpolation:
+
+        # Compute base AltAz coordinates (before any shift)
         c_coords = SkyCoord(self.centers, unit='rad', frame=observation.frame).transform_to(observation.AltAz)
-        hp_pixel, hp_weight = hp.get_interp_weights(nside, np.pi/2 - c_coords.alt.rad, c_coords.az.rad)
+        base_theta = jnp.array(np.pi/2 - c_coords.alt.rad)  # colatitude
+        base_phi = jnp.array(c_coords.az.rad)               # azimuth
 
         # Evaluate bandpass function:
         bp_values = self.bandpass(wavelengths*u.nm) * np.diff(wavelengths).mean()
@@ -45,15 +44,16 @@ class EffectiveApertureInstrument(InstrumentProtocol):
         grid = jnp.array(self.grid)
         weight = jnp.array(self.weight)
         pixel_values = jnp.array(self.values)
-        hp_pixel = jnp.array(hp_pixel)
-        hp_weight = jnp.array(hp_weight * self.weight)
         bp_values = jnp.array(bp_values)
-        
+
         def generator(params):
+            shifted_theta = base_theta - params['shift'][1]  # altitude shift (negative because theta = pi/2 - alt)
+            shifted_phi = base_phi + params['shift'][0]      # azimuth shift
+
             return InstrumentQuery(
                 centers=centers + params['shift'],
-                hp_pixels=hp_pixel,
-                hp_weight=hp_weight,
+                hp_theta=shifted_theta,
+                hp_phi=shifted_phi,
                 weight=weight,
                 grid=grid + params['shift'][None,:,None],
                 values=pixel_values,

@@ -39,7 +39,7 @@ class GaiaDR3(EmitterProtocol):
         # Get median as spectrum for now:
         self.points = spec_grid.points
         self.wvl = Wavelength(spec_grid.wvl).value
-        self.flx = Flux(np.nanmedian(spec_grid.flx, axis=-1)*u.ph, wavelength=spec_grid.wvl).value
+        self.flx = Flux(np.nanmedian(spec_grid.flx, axis=-1)*u.ph).value
         
         # Build spatial index for efficient queries
         self.build_balltree()

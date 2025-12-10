@@ -1,5 +1,6 @@
 import jax.numpy as jnp
 from jax import jit
+import jax_healpy as jhp
 
 from .interpolation import interpolate_pixel_rates, compute_pixel_weights
 
@@ -14,9 +15,10 @@ def render(scene):
     scat_rates = interpolate_pixel_rates(scene.atmosphere.YiXi[0], scene.atmosphere.YiXi[1], scat_value, scene.instrument.centers)
     scat_rates = scat_rates * scene.instrument.weight
 
-    # Direct diffuse contribution
+    # Direct diffuse contribution using jax_healpy for differentiable interpolation
     diff_value = jnp.sum(scene.instrument.bandpass * diff_sum * scene.atmosphere.extinction, axis=1)
-    diff_rates = jnp.sum(diff_value[scene.instrument.hp_pixels] * scene.instrument.hp_weight, axis=0)
+    diff_rates = jhp.get_interp_val(diff_value, scene.instrument.hp_theta, scene.instrument.hp_phi)
+    diff_rates = diff_rates * scene.instrument.weight
 
     # Direct catalog contribution:
     cat_rates = []

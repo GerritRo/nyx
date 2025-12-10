@@ -72,9 +72,8 @@ class Jones2013(EmitterProtocol):
         norm = self.calc_norm(wavelengths, moon.distance.to(u.km).value, alpha.rad, sun_angle.rad)
         
         # Get solar spectrum and normalize to moon:
-        wvl, spectrum = SolarSpectrumRieke2008()
-        flx = Flux(spectrum, wavelength=wvl).value
-        spec_samp = norm * Spectrum.from_arrays(wvl.to(u.nm).value, flx).resample(wavelengths).flux
+        wvl, energy_flux = SolarSpectrumRieke2008()
+        spec_samp = norm * Spectrum.from_energy_flux(wvl, energy_flux).resample(wavelengths).flux
         # Calculate airmass:
         airmass = get_airmass_formula()
 
