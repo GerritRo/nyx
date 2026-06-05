@@ -43,7 +43,7 @@ If you use IACTrace in your research, please cite::
 
    @software{iactrace,
      author = {Roellinghoff, Gerrit},
-     title = {nyx: Differentiable Simulation of Night Sky Background in IACTs"},
+     title = {nyx: Differentiable Simulation of Night Sky Background in Imaging Atmospheric Cherenkov Telescopes},
      url = {https://github.com/GerritRo/nyx},
      year = {2026}
    }
