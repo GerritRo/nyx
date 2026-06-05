@@ -1,0 +1,156 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nyx"
+dynamic = ["version"]
+description = "Python package for simulating sky brightness and instrumental noise in astronomical observations"
+readme = "README.md"
+license = {text = "BSD-3-Clause"}
+authors = [
+    {name = "Gerrit Roellinghoff", email = "gerrit.roellinghoff@fau.de"}
+]
+maintainers = [
+    {name = "Gerrit Roellinghoff", email = "gerrit.roellinghoff@fau.de"}
+]
+keywords = [
+    "sky-brightness",
+    "atmosphere",
+    "astronomy",
+    "astrophysics",
+    "jax",
+    "differentiable",
+    "healpix",
+    "zodiacal-light",
+    "airglow",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Topic :: Scientific/Engineering :: Astronomy",
+    "License :: OSI Approved :: BSD License",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+    "Typing :: Typed",
+]
+requires-python = ">=3.12"
+dependencies = [
+    "numpy",
+    "scipy",
+    "astropy",
+    "healpy",
+    "jax-healpy",
+    "dust_extinction",
+    "jax",
+    "chex",
+    "equinox",
+    "optimistix",
+    "h5py",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "pytest-doctestplus",
+    "jupyter>=1.0",
+    "mypy>=1.0",
+    "nbclient>=0.7.0",
+    "ruff>=0.1.0",
+    "asv>=0.6.0",
+    "virtualenv>=20.0",
+    "commitizen>=3.12.0",
+]
+docs = [
+    "sphinx",
+    "furo",
+    "sphinx-automodapi",
+    "sphinx-design",
+    "myst-nb",
+]
+
+[project.urls]
+Homepage = "https://github.com/GerritRo/nyx"
+Documentation = "https://gerritro.github.io/nyx/"
+Repository = "https://github.com/GerritRo/nyx.git"
+Issues = "https://github.com/GerritRo/nyx/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["nyx*"]
+exclude = ["tests*", "examples*"]
+
+[tool.setuptools.package-data]
+nyx = ["py.typed", "data/*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "nyx.__version__"}
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = false              # JAX stubs return Any a lot
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_any_generics = false
+check_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+strict_equality = true
+ignore_missing_imports = true
+follow_imports = "silent"
+files = ["nyx/core"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "T10"]
+ignore = [
+    "E501",   # line length (handled by formatter)
+    "SIM108", # ternary operator (readability preference)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["nyx"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short -m 'not notebooks'"
+markers = [
+    "notebooks: marks tests as notebook tests (deselect with '-m \"not notebooks\"')",
+]
+
+[tool.coverage.run]
+omit = [
+    "nyx/__init*",
+    "nyx/version*",
+    "nyx/tests/*",
+    "nyx/*/tests/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "except ImportError",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "@overload",
+]
+
+# -- Commitizen (conventional commits + changelog) --
+[tool.commitizen]
+name = "cz_conventional_commits"
+version = "0.1.0"
+version_files = [
+    "nyx/__init__.py:__version__",
+]
+tag_format = "v$version"
+update_changelog_on_bump = true
+changelog_file = "CHANGELOG.md"
+major_version_zero = true

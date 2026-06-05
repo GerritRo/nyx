@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If you use nyx in your research, please cite it using the metadata from this file."
+title: "nyx: Differentiable Simulation of Night Sky Background in Imaging Atmospheric Cherenkov Telescopes"
+abstract: >-
+  nyx models the night sky background for IACT telescopes, enabling parameter
+  estimation through HMC fitting or gradient-based optimization.
+type: software
+authors:
+  - family-names: "Roellinghoff"
+    given-names: "Gerrit"
+    email: "gerrit.roellinghoff@fau.de"
+version: "0.1.0"
+license: BSD-3-Clause
+repository-code: "https://github.com/GerritRo/nyx"
+url: "https://gerritro.github.io/nyx/"
+keywords:
+  - sky-brightness
+  - atmosphere
+  - astronomy
+  - astrophysics
+  - jax
+  - differentiable
+# Note: nyx bundles and downloads third-party datasets that carry their own
+# citation requirements. See licenses/DATA.rst.
