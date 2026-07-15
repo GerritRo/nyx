@@ -53,7 +53,8 @@ class Bandpass:
         with fits.open(f_down) as hdul:
             wvl = hdul[1].data["WAVELENGTH"] * u.angstrom
             flx = hdul[1].data["FLUX"] * u.erg / u.second / u.cm**2 / u.angstrom
-        return si.simpson(x=wvl, y=wvl * self(wvl) * flx) * u.erg / u.second / u.cm**2
+        z = wvl * self(wvl) * flx
+        return si.simpson(y=z.value, x=wvl.value) * z.unit * wvl.unit
 
     @classmethod
     def from_SVO(cls, filter_id, cache=True):
@@ -220,7 +221,8 @@ def create_color_grid(
 
     def calculate_magnitude(wvl, flx, bandpass):
         z = flx * bandpass(wvl) * wvl
-        return -2.5 * np.log10(si.simpson(y=z, x=wvl) * z.unit / bandpass.vegazero)
+        integral = si.simpson(y=z.value, x=wvl.value) * z.unit * wvl.unit
+        return -2.5 * np.log10(integral / bandpass.vegazero)
 
     def redden_by_dust_extinction(EBVs_arr):
         wvl = spec_library.wvl
