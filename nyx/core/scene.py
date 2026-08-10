@@ -11,7 +11,13 @@ import jax.numpy as jnp
 from nyx.core.filters import _navigate, per_obs_filter
 from nyx.core.observation import Observation, RenderGeometry
 from nyx.core.parameter import _ParametersTable, _wrap_like, parameters_table
-from nyx.core.protocols import AtmosphereModel, InstrumentModel, SkySource, SourceObsData
+from nyx.core.protocols import (
+    AtmosphereModel,
+    InstrumentModel,
+    SkySource,
+    SourceObsData,
+    set_source_weight,
+)
 
 
 class _ObsBundle(eqx.Module):
@@ -274,6 +280,97 @@ class Scene(eqx.Module):
             self,
             wrapped,
         )
+
+    def set_lightcurve(
+        self,
+        index: int,
+        curve: Any,
+        *,
+        source: str | None = None,
+        instrument: str | None = None,
+    ) -> Scene:
+        """Set one point source's light curve on a built scene; return a new Scene.
+
+        Unlike rebuilding, this reuses the precomputed per-observation geometry
+        (coordinate transforms, diffuse maps), so it is cheap enough to sweep
+        many curves over a single scene::
+
+            scene = Scene.build(instrument, atmosphere, {"GaiaDR3": stars}, obs)
+            for c in curves:
+                rates = scene.set_lightcurve(i, c).render()
+
+        Parameters
+        ----------
+        index : int
+            Source column to modulate, following
+            :meth:`~nyx.emitter.stars.Stars.resolved_in_fov` ordering (resolved
+            stars first).
+        curve : array-like
+            ``(nobs,)`` achromatic or ``(nobs, n_wvl)`` wavelength-dependent
+            multiplicative factor (``1.0`` unchanged, ``0.0`` fully blocked).
+        source : str, optional
+            Source name; defaults to the sole point source when unambiguous.
+        instrument : str, optional
+            Instrument name; defaults to the sole instrument when unambiguous.
+
+        Returns
+        -------
+        Scene
+            A new scene with the light curve applied; the original is unchanged.
+        """
+        inst = self._resolve_lightcurve_instrument(instrument)
+        src = self._resolve_lightcurve_source(source, inst)
+        bundle = self._obs_bundles[inst]
+        od = bundle.obs_data[src]
+        if od.source_coords is None:
+            raise ValueError(f"source {src!r} on instrument {inst!r} has no point sources")
+        nobs, n_src = int(od.source_coords.shape[0]), int(od.source_coords.shape[1])
+        n_wvl = int(self.instruments[inst].bandpass.shape[0])
+        weights = set_source_weight(
+            od.source_weights, index, curve, nobs=nobs, n_src=n_src, n_wvl=n_wvl
+        )
+        new_od = SourceObsData(
+            diffuse_conditions=od.diffuse_conditions,
+            diffuse_norm=od.diffuse_norm,
+            source_conditions=od.source_conditions,
+            source_coords=od.source_coords,
+            source_weights=weights,
+            direct=od.direct,
+            inscatter=od.inscatter,
+            _per_obs=tuple(dict.fromkeys(od._per_obs + ("source_weights",))),
+        )
+        new_bundle = _ObsBundle(
+            obs_data={**bundle.obs_data, src: new_od},
+            render_geometry=bundle.render_geometry,
+            nobs=bundle.nobs,
+        )
+        return eqx.tree_at(lambda s: s._obs_bundles[inst], self, new_bundle)
+
+    def _resolve_lightcurve_instrument(self, instrument: str | None) -> str:
+        if instrument is not None:
+            if instrument not in self._obs_bundles:
+                raise KeyError(
+                    f"{instrument!r} is not an instrument; choices: {list(self._obs_bundles)}"
+                )
+            return instrument
+        if len(self._obs_bundles) == 1:
+            return next(iter(self._obs_bundles))
+        raise ValueError(
+            f"scene has multiple instruments {list(self._obs_bundles)}; pass instrument=..."
+        )
+
+    def _resolve_lightcurve_source(self, source: str | None, instrument: str) -> str:
+        obs_data = self._obs_bundles[instrument].obs_data
+        if source is not None:
+            if source not in obs_data:
+                raise KeyError(
+                    f"{source!r} is not a source on {instrument!r}; choices: {list(obs_data)}"
+                )
+            return source
+        point = [name for name, od in obs_data.items() if od.source_coords is not None]
+        if len(point) == 1:
+            return point[0]
+        raise ValueError(f"specify source=...; point sources on {instrument!r}: {point}")
 
     def parameters_table(self) -> _ParametersTable:
         """Return a pretty-printed table of every :class:`Parameter` in

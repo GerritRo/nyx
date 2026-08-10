@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from nyx.core.filters import tile_per_obs
 from nyx.core.spectral import SpectralModel
@@ -94,6 +95,15 @@ class SourceObsData(eqx.Module):
         sources, or None if no point sources.
     source_coords : jax.Array or None
         Point source positions ``(nobs, n_src, 2)`` in AltAz, or None.
+    source_weights : jax.Array or None
+        Per-source, per-observation multiplicative flux factor applied to
+        point-source spectra at render time (``1.0`` leaves a source
+        unchanged, ``0.0`` fully blocks it).  Shape ``(nobs, n_src)`` for an
+        achromatic factor (broadcast over wavelength) or ``(nobs, n_src,
+        n_wvl)`` for a wavelength-dependent factor (applied elementwise).
+        Used to inject light curves such as occultations or variable stars.
+        ``None`` means no modulation.  When set, list ``"source_weights"``
+        in ``_per_obs`` so the render vmap slices it per observation.
     direct : bool
         Whether diffuse radiance goes through line-of-sight extinction
         (the direct path).  ``True`` for normal diffuse sources
@@ -111,6 +121,7 @@ class SourceObsData(eqx.Module):
     diffuse_norm: jax.Array = eqx.field(default_factory=lambda: jnp.array(1.0))
     source_conditions: jax.Array | None = None
     source_coords: jax.Array | None = None
+    source_weights: jax.Array | None = None
     direct: bool = eqx.field(static=True, default=True)
     inscatter: bool = eqx.field(static=True, default=False)
     _per_obs: tuple[str, ...] = eqx.field(static=True, default=())
@@ -123,6 +134,63 @@ class SourceObsData(eqx.Module):
                 f"SourceObsData._per_obs references unknown fields: {bad!r}. "
                 f"Valid fields: {valid!r}"
             )
+
+
+def set_source_weight(
+    weights: jax.Array | None,
+    index: int,
+    curve: object,
+    *,
+    nobs: int,
+    n_src: int,
+    n_wvl: int,
+) -> jax.Array:
+    """Return a :attr:`SourceObsData.source_weights` array with source ``index``
+    set to ``curve``.
+
+    Shared by :meth:`nyx.emitter.stars.Stars.prepare` (building weights from
+    registered light curves) and :meth:`nyx.core.scene.Scene.set_lightcurve`
+    (editing them on a built scene).
+
+    Parameters
+    ----------
+    weights : jax.Array or None
+        Current weight array, or ``None`` if no source is modulated yet.
+    index : int
+        Source column to set.
+    curve : array-like
+        ``(nobs,)`` achromatic or ``(nobs, n_wvl)`` wavelength-dependent factor.
+    nobs, n_src, n_wvl : int
+        Observation count, source count and wavelength-grid size.
+
+    Returns
+    -------
+    jax.Array
+        ``(nobs, n_src)`` if all weights are achromatic, else ``(nobs, n_src,
+        n_wvl)`` (existing achromatic entries are broadcast across wavelength as
+        soon as any chromatic curve is applied).
+    """
+    curve = np.asarray(curve, dtype=float)
+    if not 0 <= index < n_src:
+        raise IndexError(f"source index {index} out of range for {n_src} sources")
+    chromatic = curve.ndim == 2 or (weights is not None and weights.ndim == 3)
+    if weights is None:
+        base = np.ones((nobs, n_src, n_wvl) if chromatic else (nobs, n_src))
+    else:
+        base = np.array(weights, dtype=float)  # writable copy (jax arrays are read-only)
+        if chromatic and base.ndim == 2:  # promote existing achromatic entries
+            base = np.broadcast_to(base[..., None], (nobs, n_src, n_wvl)).copy()
+    if curve.ndim == 1:
+        if curve.shape != (nobs,):
+            raise ValueError(f"achromatic curve length {curve.shape} != nobs {nobs}")
+        base[:, index] = curve[:, None] if base.ndim == 3 else curve
+    else:
+        if curve.shape != (nobs, n_wvl):
+            raise ValueError(
+                f"chromatic curve shape {curve.shape} != (nobs, n_wvl)={(nobs, n_wvl)}"
+            )
+        base[:, index, :] = curve
+    return jnp.asarray(base)
 
 
 # Emitter builder protocol
@@ -172,6 +240,11 @@ class SourceModel(SkySource):
     def point_sources(self, obs_data: SourceObsData | None = None) -> PointSourceData | None:
         if obs_data is not None and obs_data.source_coords is not None:
             spectra = self.spectral_model(obs_data.source_conditions)
+            w = obs_data.source_weights
+            if w is not None:
+                # post-vmap: (n_src,) achromatic -> broadcast over wavelength;
+                #            (n_src, n_wvl) chromatic -> elementwise per wavelength.
+                spectra = spectra * (w[:, None] if w.ndim == 1 else w)
             return PointSourceData(
                 spectra=spectra,
                 coords=obs_data.source_coords,

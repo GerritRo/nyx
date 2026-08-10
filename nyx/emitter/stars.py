@@ -6,7 +6,7 @@ from astropy.coordinates import ICRS, SkyCoord
 from astropy.utils.data import download_file
 
 from nyx.core.coordinates import HEALPixCatalog, rotate_healpix
-from nyx.core.protocols import SourceObsData
+from nyx.core.protocols import SourceObsData, set_source_weight
 from nyx.core.spectral import ParametricSpectrum, SpectralModel
 from nyx.emitter._base import BaseEmitter
 from nyx.utils.spectra import Bandpass, PicklesTRDSAtlas1998, create_color_grid
@@ -62,6 +62,61 @@ class Stars(BaseEmitter):
         )
         self._spectral_model = spectral_model
         self._hpx_index = HEALPixCatalog(bright_ra, bright_dec)
+        self._lightcurves: list[tuple[int, np.ndarray]] = []
+
+    def resolved_in_fov(self, obs) -> dict[str, np.ndarray]:
+        """Resolved (individually rendered) stars in the FOV, in index order.
+
+        The returned position ``i`` is exactly the ``index`` accepted by
+        :meth:`add_lightcurve`: both use the same FOV catalog query, so the
+        ordering is guaranteed to match the point sources built by
+        :meth:`prepare`.
+
+        Parameters
+        ----------
+        obs : Observation
+
+        Returns
+        -------
+        dict
+            ``ra_deg``, ``dec_deg`` and ``conditions`` (``[G, BP, RP]``) of
+            each resolved star, ordered by index.
+        """
+        target_icrs = obs.target_icrs.transform_to("icrs")
+        cat_idx = self._hpx_index.query(
+            target_icrs.ra.deg,
+            target_icrs.dec.deg,
+            np.degrees(obs.geom.fov),
+        )
+        coords = self._coords[cat_idx]
+        return {
+            "ra_deg": coords.ra.deg,
+            "dec_deg": coords.dec.deg,
+            "conditions": self._bright_conditions[cat_idx],
+        }
+
+    def add_lightcurve(self, index: int, curve) -> None:
+        """Modulate one resolved in-FOV star's brightness by a per-frame curve.
+
+        The curve multiplies the star's flux at every time step, which (because
+        the render is linear in each source's spectrum) is exactly an
+        occultation or variable-star light curve.
+
+        Parameters
+        ----------
+        index : int
+            Index into the resolved in-FOV star list (see
+            :meth:`resolved_in_fov`).  Only resolved stars (brighter than
+            ``lim_mag``) can be modulated individually.
+        curve : array-like
+            Per-observation multiplicative factor (``1.0`` leaves the star
+            unchanged, ``0.0`` fully blocks it).  Either ``(nobs,)`` for an
+            achromatic factor, or ``(nobs, n_wvl)`` evaluated on ``geo.wvls``
+            for a wavelength-dependent factor (e.g. a chromatic occultation).
+            The leading axis must match the number of observation times at
+            :meth:`prepare` time.
+        """
+        self._lightcurves.append((int(index), np.asarray(curve, dtype=float)))
 
     def _subtract_resolved_flux(self, fov_pix, fov_flux, cat_idx):
         """Remove resolved star flux from quasi-point FOV pixels.
@@ -129,6 +184,24 @@ class Stars(BaseEmitter):
 
         source_conditions = jnp.asarray(np.vstack([resolved_cond, quasi_cond]))
 
+        # Per-source light curves (occultations, variable stars).  Resolved
+        # stars occupy indices [0, n_resolved) in both source_conditions and
+        # the per-obs source_coords stack, so the registered index maps
+        # directly onto a source column.  A curve may be achromatic ((nobs,))
+        # or wavelength-dependent ((nobs, n_wvl)); ``set_source_weight`` handles
+        # the array shape (2-D or 3-D) and promotion, shared with Scene editing.
+        n_resolved = len(resolved_cond)
+        n_src, n_wvl = source_conditions.shape[0], len(self._wvls)
+        source_weights = None
+        for idx, curve in self._lightcurves:
+            if not 0 <= idx < n_resolved:
+                raise IndexError(
+                    f"lightcurve index {idx} out of range; {n_resolved} resolved stars in FOV"
+                )
+            source_weights = set_source_weight(
+                source_weights, idx, curve, nobs=obs.nobs, n_src=n_src, n_wvl=n_wvl
+            )
+
         # Rotate diffuse map to AltAz and transform coords per observation.
         # Complete sky_map is used for scattering (no FOV masking)
         # resolved + quasi-point sources go through direct extinction.
@@ -161,8 +234,10 @@ class Stars(BaseEmitter):
             diffuse_norm=jnp.array(1.0 / obs.geom.pixel_area),
             source_conditions=source_conditions,
             source_coords=jnp.stack(coords_list),
+            source_weights=source_weights,
             direct=False,
-            _per_obs=("diffuse_conditions", "source_coords"),
+            _per_obs=("diffuse_conditions", "source_coords")
+            + (("source_weights",) if source_weights is not None else ()),
         )
 
     @classmethod
