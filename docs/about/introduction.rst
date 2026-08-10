@@ -11,11 +11,9 @@ What is nyx?
 nyx provides a computational framework for:
 
 - **Night Sky Simulation**: Simulate the expected brightness in photons/s/m^2 at any location on earth.
-- **Telescope Response**: Allows a flexible format for instrument characterization, independent of origin. 
-Weights night sky simulation with actual telescope response to create realistic NSB images.
+- **Telescope Response**: Allows a flexible format for instrument characterization, independent of origin. Weights night sky simulation with actual telescope response to create realistic NSB images.
 - **Fast Rendering**: Due to inbuilt GPU support and just-in-time compilation of JAX, NSB images are rendered in ms.
-- **Optimization**: nyx is fully differentiable via JAX's automatic differentiation, enabling gradient based recovery of 
-instrument, atmosphere and emitter properties.
+- **Optimization**: nyx is fully differentiable via JAX's automatic differentiation, enabling gradient based recovery of instrument, atmosphere and emitter properties.
 
 Target Audience
 ---------------
