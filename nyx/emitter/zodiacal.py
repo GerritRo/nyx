@@ -10,6 +10,17 @@ from nyx.core.units import energy_flux_to_photon_flux
 from nyx.emitter._base import BaseEmitter
 from nyx.utils.spectra import load_solar_flux
 
+# Wavelength the Leinert (1998) colour correction is normalised at, in nm.
+_REFERENCE_WAVELENGTH = 500.0
+
+# Solar elongations the colour correction is tabulated at, in degrees.
+_ELONGATION_RANGE = (30.0, 90.0)
+
+# Reddening slopes as (blue-ward of the reference, red-ward of it), at the
+# near and far end of _ELONGATION_RANGE respectively.
+_SLOPE_NEAR = (1.2, 0.8)
+_SLOPE_FAR = (0.9, 0.6)
+
 
 def _leinert_weights(alpha, beta, leinert_points, leinert_values, wvls):
     """Compute Leinert zodiacal light weights with color correction.
@@ -47,7 +58,9 @@ def _leinert_weights(alpha, beta, leinert_points, leinert_values, wvls):
     points = np.stack([alpha_folded.ravel(), beta_abs.ravel()], axis=-1)
     weights = np.asarray(interp(points)).reshape(alpha_folded.shape)
 
-    # Color correction
+    # Color correction.  Leinert (1998) gives a broken slope: the reddening
+    # is steeper blue-ward of the 500 nm reference than red-ward of it, and
+    # shallower the further from the Sun one looks.
     eps = np.arccos(
         np.clip(
             np.cos(alpha_folded) * np.cos(beta_abs),
@@ -55,9 +68,17 @@ def _leinert_weights(alpha, beta, leinert_points, leinert_values, wvls):
             1.0,
         )
     )
-    elon_deg = np.clip(np.rad2deg(eps), 30, 90)
-    elon_f = -0.3 * (elon_deg - 30) / 60
-    color_corr = 1 + (1.2 + elon_f[:, None]) * np.log10(np.asarray(wvls) / 500)
+    elon_deg = np.clip(np.rad2deg(eps), *_ELONGATION_RANGE)
+    # 0 at the near end of the elongation range, 1 at the far end.
+    far_frac = (elon_deg - _ELONGATION_RANGE[0]) / (_ELONGATION_RANGE[1] - _ELONGATION_RANGE[0])
+
+    wvl_arr = np.asarray(wvls)
+    is_blue = wvl_arr < _REFERENCE_WAVELENGTH
+    slope_near = np.where(is_blue, _SLOPE_NEAR[0], _SLOPE_NEAR[1])
+    slope_far = np.where(is_blue, _SLOPE_FAR[0], _SLOPE_FAR[1])
+    slope = slope_near + far_frac[:, None] * (slope_far - slope_near)
+
+    color_corr = 1 + slope * np.log10(wvl_arr / _REFERENCE_WAVELENGTH)
 
     return jnp.asarray(weights[:, None] * color_corr)
 

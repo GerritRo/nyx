@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any
 
 import equinox as eqx
@@ -16,13 +16,14 @@ from nyx.core.parameter import (
     _is_param,
     _ParametersTable,
     dump_params,
+    freeze_all,
     parameters_table,
 )
 
 if TYPE_CHECKING:
     from nyx.core.scene import Scene
 
-__all__ = ["Optimizer", "MultiTargetFit", "parameter_errors"]
+__all__ = ["Optimizer", "MultiTargetFit", "parameter_errors", "rescale_from_errors"]
 
 
 def _is_trainable(x: Any) -> bool:
@@ -338,7 +339,58 @@ def parameter_errors[T](
     return unravel(sigma_flat)
 
 
+def rescale_from_errors[T](fitted: T, errs: T) -> T:
+    """
+    Rescale every trainable Parameter using error estimates as new scales.
+    This normalises parameter magnitudes across physically disparate 
+    quantities and can improve convergence in a subsequent fit.
+    
+    Parameters
+    ----------
+    fitted : pytree
+        Model as returned by :meth:`Optimizer.run`.
+    errs : pytree
+        Error estimates as returned by :meth:`Optimizer.errors` or
+        :func:`parameter_errors`.  Must share the trainable-parameter
+        structure of *fitted*.
+    Returns
+    -------
+    pytree
+        Copy of *fitted* with every trainable Parameter rescaled.
+    """
+    diff, static = eqx.partition(fitted, _is_trainable, is_leaf=_is_param)
+    def rescale_leaf(param: Any, err: Any) -> Any:
+        if not (_is_param(param) and _is_param(err)):
+            return param
+        new_scale = float(jnp.max(jnp.abs(err.value)))
+        if new_scale == 0.0 or not np.isfinite(new_scale):
+            return param
+        return Parameter.from_value(
+            param.value,
+            scale=new_scale,
+            per_obs=param.per_obs,
+            frozen=param.frozen,
+        )
+    rescaled = jax.tree.map(rescale_leaf, diff, errs, is_leaf=_is_param)
+    return eqx.combine(rescaled, static, is_leaf=_is_param)
+
+    
 # Multi-target fitting
+
+
+#: Scene fields that :class:`MultiTargetFit` can link across targets.
+_SHAREABLE_FIELDS = ("atmosphere", "sources")
+
+
+def _signature(tree: Any) -> tuple[Any, tuple[Any, ...]]:
+    """Return ``(treedef, leaf shapes)`` with Parameters treated as leaves.
+
+    Two subtrees with equal signatures can be swapped for one another with
+    :func:`equinox.tree_at`.
+    """
+    leaves, treedef = jax.tree_util.tree_flatten(tree, is_leaf=_is_param)
+    shapes = tuple(jnp.shape(leaf.factor) if _is_param(leaf) else None for leaf in leaves)
+    return treedef, shapes
 
 
 def _freeze_where[T](tree: T, predicate: Callable[[Any], bool]) -> T:
@@ -359,11 +411,14 @@ class MultiTargetFit(eqx.Module):
     with the same name across scenes are linked: their shared (non-per-obs)
     Parameters live once in ``canonical_instruments`` and are injected into
     every scene at render time, so JAX sums their gradients over all
-    targets.  Per-obs Parameters (``shift``, ``rotation``) and per-target
-    scene state (``atmosphere``, ``sources``) stay on the individual scenes.
+    targets.  Per-obs Parameters (``shift``, ``rotation``) stay on the
+    individual scenes, and so does per-target scene state (``atmosphere``,
+    ``sources``) unless it is listed in *share*.
 
     When several scenes share an instrument name, the canonical shared
-    Parameter values come from the first scene to define that name.
+    Parameter values come from the first scene to define that name; the
+    canonical values of the fields in *share* likewise come from the first
+    scene.
 
     Fit it with a plain :class:`Optimizer`::
 
@@ -371,16 +426,41 @@ class MultiTargetFit(eqx.Module):
         mtf = MultiTargetFit({'A': scene_A, 'B': scene_B})
         opt = Optimizer(loss_fn, optx.BFGS(rtol=1e-5, atol=1e-5))
 
+    Fit one common atmosphere over both targets instead of one per
+    target::
+
+        mtf = MultiTargetFit({'A': scene_A, 'B': scene_B}, share='atmosphere')
+        mtf.parameters_table()   # 'shared.atmosphere.Mie.aod_500', listed once
+
     Parameters
     ----------
     scenes : dict
         ``{target_name: Scene}``, one pre-built Scene per target.
+    share : str or iterable of str, optional
+        Scene fields to link across all targets, from ``'atmosphere'`` and
+        ``'sources'``.  A linked field lives once in ``canonical_fields``
+        and is injected into every scene at render time, so its Parameters
+        are fitted jointly.  Linked fields must have the same structure and
+        Parameter shapes in every scene.
     """
 
     canonical_instruments: dict[str, Any]
+    canonical_fields: dict[str, Any]
     target_scenes: dict[str, Scene]
 
-    def __init__(self, scenes: dict[str, Scene]) -> None:
+    def __init__(
+        self,
+        scenes: dict[str, Scene],
+        share: str | Iterable[str] = (),
+    ) -> None:
+        share = (share,) if isinstance(share, str) else tuple(share)
+        for field in share:
+            if field not in _SHAREABLE_FIELDS:
+                raise ValueError(
+                    f"Cannot share {field!r} across targets; shareable "
+                    f"fields are {_SHAREABLE_FIELDS}."
+                )
+
         canonical: dict[str, Any] = {}
         for scene in scenes.values():
             for name, inst in scene.instruments.items():
@@ -405,12 +485,25 @@ class MultiTargetFit(eqx.Module):
 
         self.canonical_instruments = canonical
 
+        first = next(iter(scenes.values()))
+        for field in share:
+            reference = getattr(first, field)
+            for t, scene in scenes.items():
+                if _signature(getattr(scene, field)) != _signature(reference):
+                    raise ValueError(
+                        f"Field {field!r} of target {t!r} does not match that "
+                        f"of target {next(iter(scenes))!r}; shared fields must "
+                        f"have the same structure and Parameter shapes in "
+                        f"every scene."
+                    )
+        self.canonical_fields = {field: getattr(first, field) for field in share}
+
         # Each scene keeps a frozen shadow of the shared Parameters; the
         # canonical copies are injected over them at render time.
         def _get_instruments(s: Any) -> Any:
             return s.instruments
 
-        self.target_scenes = {
+        target_scenes = {
             t: eqx.tree_at(
                 _get_instruments,
                 scene,
@@ -418,10 +511,28 @@ class MultiTargetFit(eqx.Module):
             )
             for t, scene in scenes.items()
         }
+        for field in share:
+            target_scenes = {
+                t: eqx.tree_at(
+                    lambda s, _f=field: getattr(s, _f),
+                    scene,
+                    freeze_all(getattr(scene, field)),
+                )
+                for t, scene in target_scenes.items()
+            }
+        self.target_scenes = target_scenes
 
     def _inject_shared(self, scene: Scene) -> Scene:
-        """Replace the non-per-obs Parameters in *scene*'s instruments with
-        their canonical counterparts."""
+        """Replace the shared Parameters in *scene* -- the non-per-obs ones
+        in its instruments, plus any linked field -- with their canonical
+        counterparts."""
+
+        for field, canonical_field in self.canonical_fields.items():
+            scene = eqx.tree_at(
+                lambda s, _f=field: getattr(s, _f),
+                scene,
+                canonical_field,
+            )
 
         def pick(a: Any, b: Any) -> Any:
             return b if (_is_param(b) and not b.per_obs) else a
@@ -471,15 +582,22 @@ class MultiTargetFit(eqx.Module):
 
             return jax.tree.map(_pick, tree, is_leaf=_is_param)
 
-        display = {
-            "shared": strip(self.canonical_instruments, lambda p: p.per_obs),
+        shared: dict[str, Any] = {
+            # 'instruments' is stripped from displayed paths, so the shared
+            # instrument Parameters still read as 'shared.CT1.efficiency'.
+            "instruments": strip(self.canonical_instruments, lambda p: p.per_obs),
         }
+        shared.update(self.canonical_fields)
+
+        display: dict[str, Any] = {"shared": shared}
         for t, scene in self.target_scenes.items():
-            display[t] = {
-                "atmosphere": scene.atmosphere,
-                "sources": scene.sources,
-                "instruments": strip(scene.instruments, lambda p: not p.per_obs),
+            per_target = {
+                field: getattr(scene, field)
+                for field in _SHAREABLE_FIELDS
+                if field not in self.canonical_fields
             }
+            per_target["instruments"] = strip(scene.instruments, lambda p: not p.per_obs)
+            display[t] = per_target
         return display
 
     def parameters_table(self) -> _ParametersTable:

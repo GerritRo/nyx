@@ -153,6 +153,7 @@ class ParametricSpectrum(SpectralModel):
         wavelengths: jax.Array,
         color_fn: Callable[[Any], Any],
         mag_fn: Callable[[Any], Any],
+        active_fn: Callable[[Any], Any] | None = None,
     ) -> ParametricSpectrum:
         """Create from a colour-indexed :class:`SpectralGrid`.
 
@@ -174,6 +175,13 @@ class ParametricSpectrum(SpectralModel):
         mag_fn : Callable
             ``conditions -> mag_array``.  Extracts the magnitude from the
             conditions array, e.g. ``lambda c: c[..., 0]`` for Gaia G.
+        active_fn : Callable or None
+            ``conditions -> active_array``.  Optional 0/1 mask switching
+            individual sources off, e.g. ``lambda c: c[..., 2]`` for a
+            below-horizon flag.  Catalogs rendered through a vmapped
+            observation axis must keep a fixed source count, so sources
+            that drop out are masked here rather than filtered away.
+            ``None`` leaves every source active.
         """
         wvl_native = to_wavelength_nm(spec_grid.wvl)
         flx_native = jnp.asarray(np.nanmedian(spec_grid.flx, axis=-1))
@@ -194,6 +202,9 @@ class ParametricSpectrum(SpectralModel):
             color = jnp.clip(color_fn(conditions), max=clip_max)
             mag = mag_fn(conditions)
             shapes = interpol(color)
-            return 10 ** (-0.4 * mag)[..., None] * shapes
+            spectra = 10 ** (-0.4 * mag)[..., None] * shapes
+            if active_fn is not None:
+                spectra = active_fn(conditions)[..., None] * spectra
+            return spectra
 
         return cls(params=flux_resampled, _model_fn=_interp_model)
