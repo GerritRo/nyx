@@ -272,8 +272,10 @@ class EffectiveApertureInstrument(_BaseApertureInstrument):
         self.batch_size = batch_size
 
         self.centers = jnp.asarray(np.mean(grid, axis=2))
+        # values[i] is indexed [lon, lat], so the inner (last-axis) integral
+        # runs over lat and the outer one over lon.
         self._weight = jnp.asarray(
-            np.array([simps(simps(values[i], grid[i][0]), grid[i][1]) for i in range(len(grid))])
+            np.array([simps(simps(values[i], grid[i][1]), grid[i][0]) for i in range(len(grid))])
         )
         self.grid = jnp.asarray(grid)
         self._pixel_values = jnp.asarray(values)
@@ -424,7 +426,7 @@ class EffectiveApertureMisalignmentInstrument(_BaseApertureInstrument):
             for isy in range(nsy):
                 weights[isx, isy] = np.array(
                     [
-                        simps(simps(all_values[isx, isy, i], grid[i][0]), grid[i][1])
+                        simps(simps(all_values[isx, isy, i], grid[i][1]), grid[i][0])
                         for i in range(n_pix)
                     ]
                 )

@@ -132,8 +132,8 @@ def interpolate_pixel_rates(Xi, Yi, values, coords):
     ystart, ystep = Yi[0], Yi[1] - Yi[0]
     xstart, xstep = Xi[0], Xi[1] - Xi[0]
 
-    y_coords = (coords[:, 0] - ystart) / ystep
-    x_coords = (coords[:, 1] - xstart) / xstep
+    x_coords = (coords[:, 0] - xstart) / xstep
+    y_coords = (coords[:, 1] - ystart) / ystep
 
     y0, x0, fy, fx, valid_mask = _bilinear_coeffs(y_coords, x_coords, height, width)
     interpolated = _bilinear_sample(values, y0, x0, fy, fx)
