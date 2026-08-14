@@ -1,5 +1,18 @@
+from functools import cache
+
+import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
+from scipy.integrate import simpson
+
+#: Tolerance for :meth:`PixelLattice.from_grid`, as a fraction of one
+#: response-grid step.  Grids that share a lattice by construction miss the
+#: fitted one only by the float32 round-off of their stored coordinates
+#: (~1e-5 of a step for a Cherenkov camera), while grids that genuinely do
+#: not share one miss it by O(0.1) of a step, so anything in this range
+#: separates the two cases.
+LATTICE_TOL = 1e-3
 
 
 def _bilinear_coeffs(y_coords, x_coords, height, width):
@@ -29,56 +42,284 @@ def _bilinear_coeffs(y_coords, x_coords, height, width):
     return y0, x0, fy, fx, valid_mask
 
 
-def _bilinear_sample(values, y0, x0, fy, fx):
-    """Sample a 2D grid with bilinear weights."""
-    y1 = y0 + 1
-    x1 = x0 + 1
-    return (
-        (1 - fx) * (1 - fy) * values[y0, x0]
-        + fx * (1 - fy) * values[y0, x1]
-        + (1 - fx) * fy * values[y1, x0]
-        + fx * fy * values[y1, x1]
-    )
+# Pixel response lattice
 
 
-def compute_pixel_weights(centers, values_stack, coords, rates, batch_size=None):
-    """Bilinear interpolation of point source rates onto pixel grid.
+class PixelLattice(eqx.Module):
+    """The sampling lattice every pixel's response grid is a window onto.
+
+    Response tables produced by one ray-tracing run share a single step and
+    differ only by an integer offset, so all of them are windows onto one
+    lattice covering the focal plane.  That is what makes the catalogue
+    projection separable: rasterise the point sources onto the lattice once
+    (:func:`project_lattice`), then read each pixel's window out of it.
+
+    Holding the geometry this way makes the shared lattice exact rather than
+    something rediscovered per instrument: pixel positions are integers, and
+    the whole focal-plane geometry is four numbers plus one integer pair per
+    pixel.  :meth:`from_grid` recovers it from explicit per-pixel sample
+    coordinates, as a ray tracer emits them.
 
     Parameters
     ----------
-    batch_size : int or None
-        Number of pixels processed in parallel per ``lax.map`` iteration.
-        ``None`` (default) means fully parallel, equivalent to
-        ``jax.vmap`` over pixels, one kernel launch, peak memory
-        ``O(n_pixels * n_sources)`` intermediates on the backward pass.
-        A smaller value bounds that memory at
-        ``O(batch_size * n_sources)`` at the cost of
-        ``ceil(n_pixels / batch_size)`` serial kernel launches.
-        ``batch_size=1`` is fully serial (minimum memory, maximum
-        launch overhead).
+    origin : array-like, shape (2,)
+        Position of lattice node ``(0, 0)``, in radians.
+    step : array-like, shape (2,)
+        Node spacing along each axis, in radians.
+    offset : array-like, shape (n_pixels, 2)
+        Node index of each pixel's response window corner.
+    grid_shape : tuple of int
+        Response table shape ``(height, width)`` of a single pixel.
     """
 
-    @jax.checkpoint
-    def compute_single_weight(args):
-        centers_item, values = args
-        height, width = values.shape
-        ystart, ystep = centers_item[0, 0], centers_item[0, 1] - centers_item[0, 0]
-        xstart, xstep = centers_item[1, 0], centers_item[1, 1] - centers_item[1, 0]
+    origin: jax.Array
+    step: jax.Array
+    offset: jax.Array
+    grid_shape: tuple[int, int] = eqx.field(static=True)
+    shape: tuple[int, int] = eqx.field(static=True)
 
-        y_coords = (coords[:, 0] - ystart) / ystep
-        x_coords = (coords[:, 1] - xstart) / xstep
+    def __init__(self, origin, step, offset, grid_shape):
+        self.origin = jnp.asarray(origin, dtype=jnp.float32)
+        self.step = jnp.asarray(step, dtype=jnp.float32)
+        self.offset = jnp.asarray(offset, dtype=jnp.int32)
+        self.grid_shape = (int(grid_shape[0]), int(grid_shape[1]))
 
-        y0, x0, fy, fx, valid_mask = _bilinear_coeffs(y_coords, x_coords, height, width)
-        interpolated = _bilinear_sample(values, y0, x0, fy, fx)
-        return jnp.sum(jnp.where(valid_mask, interpolated * rates, 0.0))
+        corner = np.asarray(offset)
+        if corner.ndim != 2 or corner.shape[1] != 2:
+            raise ValueError(f"offset must have shape (n_pixels, 2), got {corner.shape}")
+        if np.any(corner < 0):
+            raise ValueError(f"offsets must be non-negative, got {corner.min()}")
+        # The raster must span every window, so the lattice extends one full
+        # response grid beyond the furthest corner.
+        self.shape = (
+            int(corner[:, 0].max()) + self.grid_shape[0],
+            int(corner[:, 1].max()) + self.grid_shape[1],
+        )
 
-    if batch_size is None:
-        batch_size = centers.shape[0]
-    return jax.lax.map(
-        compute_single_weight,
-        (centers, values_stack),
-        batch_size=batch_size,
+    @property
+    def n_pixels(self) -> int:
+        """Number of pixels indexed."""
+        return self.offset.shape[0]
+
+    @property
+    def centers(self) -> jax.Array:
+        """Pixel centres in the offset frame, radians. Shape (n_pixels, 2)."""
+        middle = (jnp.asarray(self.grid_shape, dtype=self.step.dtype) - 1.0) / 2.0
+        return self.origin + (self.offset + middle) * self.step
+
+    @property
+    def grid(self) -> jax.Array:
+        """Per-pixel response sample coordinates. Shape (n_pixels, 2, grid_dim).
+
+        The explicit form :meth:`from_grid` consumes, for inspection and
+        for comparing against a ray tracer's own coordinates.
+        """
+        if self.grid_shape[0] != self.grid_shape[1]:
+            raise ValueError(
+                f"grid carries one sample count for both axes, so it cannot represent "
+                f"a {self.grid_shape[0]}x{self.grid_shape[1]} window"
+            )
+        nodes = jnp.arange(self.grid_shape[0], dtype=self.step.dtype)
+        return self.origin[None, :, None] + (
+            (self.offset[:, :, None] + nodes[None, None, :]) * self.step[None, :, None]
+        )
+
+    @classmethod
+    def from_grid(cls, grid, values, tol: float = LATTICE_TOL) -> "PixelLattice":
+        """Recover the lattice underlying explicit sample coordinates.
+
+        Parameters
+        ----------
+        grid : array, shape (n_pixels, 2, grid_dim)
+            Pixel sub-grid coordinates in radians.
+        values : array, shape (..., n_pixels, height, width)
+            Pixel response values.  Leading axes (e.g. a misalignment
+            table) are all checked.
+        tol : float
+            Alignment tolerance, in units of one response-grid step.
+
+        Returns
+        -------
+        PixelLattice
+
+        Raises
+        ------
+        ValueError
+            If the response tables do not vanish on their boundary rows and
+            columns, or if the sample coordinates do not sit on the nodes of
+            a common lattice to within *tol*.  Both are required for the
+            projection to be separable; see :func:`project_lattice`.
+        """
+        grid = np.asarray(grid, dtype=np.float64)
+        values = np.asarray(values)
+        height, width = int(values.shape[-2]), int(values.shape[-1])
+        if grid.ndim != 3 or grid.shape[1] != 2:
+            raise ValueError(f"grid must have shape (n_pixels, 2, grid_dim), got {grid.shape}")
+        if grid.shape[2] != height or height != width:
+            raise ValueError(
+                f"grid gives {grid.shape[2]} samples per axis for a {height}x{width} "
+                f"response; the response must be square"
+            )
+        if not np.all(np.isfinite(grid)):
+            raise ValueError("grid contains non-finite sample coordinates")
+
+        edge = max(
+            np.abs(values[..., 0, :]).max(),
+            np.abs(values[..., -1, :]).max(),
+            np.abs(values[..., :, 0]).max(),
+            np.abs(values[..., :, -1]).max(),
+        )
+        if edge != 0:
+            raise ValueError(
+                f"responses must vanish on their boundary rows and columns (largest "
+                f"edge value {edge:.3e}); pad the tables with a zero border"
+            )
+
+        origin = np.empty(2)
+        step = np.empty(2)
+        offset = np.empty((grid.shape[0], 2), dtype=np.int64)
+        for axis in (0, 1):
+            coords = grid[:, axis, :]
+            o, s, residual = _fit_lattice_axis(coords)
+            if s == 0:
+                raise ValueError(f"grid has a zero step along axis {axis}")
+            if residual > tol:
+                raise ValueError(
+                    f"response grids miss a common lattice by {residual:.2e} of a step "
+                    f"on axis {axis} (tolerance {tol:.0e}); re-tabulate them on a "
+                    f"shared grid"
+                )
+            origin[axis], step[axis] = o, s
+            offset[:, axis] = np.round((coords[:, 0] - o) / s)
+
+        return cls(origin=origin, step=step, offset=offset, grid_shape=(height, width))
+
+
+def _fit_lattice_axis(coords_1d, n_iter: int = 8):
+    """Least-squares (origin, step) of the lattice underlying *coords_1d*.
+
+    Parameters
+    ----------
+    coords_1d : ndarray, shape (n_pixels, grid_dim)
+        Sample positions of every pixel's response grid along one axis.
+
+    Returns
+    -------
+    origin, step : float
+    residual : float
+        Largest deviation of any sample from a lattice node, in steps.
+    """
+    flat = coords_1d.reshape(-1)
+    step = float(np.median(np.diff(coords_1d, axis=1)))
+    if step == 0 or not np.isfinite(step):
+        return 0.0, 0.0, np.inf
+    origin = float(flat.min())
+    node = np.round((flat - origin) / step)
+    for _ in range(n_iter):
+        design = np.stack([np.ones_like(node), node], axis=1)
+        origin, step = np.linalg.lstsq(design, flat, rcond=None)[0]
+        new_node = np.round((flat - origin) / step)
+        if np.array_equal(new_node, node):
+            break
+        node = new_node
+    # Re-base so the lowest sample sits on node 0.
+    origin = float(origin + step * node.min())
+    node = node - node.min()
+    residual = float(np.max(np.abs((flat - origin) / step - node)))
+    return origin, float(step), residual
+
+
+# Point-source projection
+
+
+def project_lattice(lattice: PixelLattice, values, coords, rates):
+    """Project point sources onto pixels via the shared response lattice.
+
+    Sources are rasterised onto the lattice with bilinear weights, then each
+    pixel integrates its own window of the rasterised map against its
+    response.  This is bilinear interpolation of each pixel's response at
+    each source position -- splatting and interpolation are adjoint, so the
+    two agree exactly -- but it costs
+    ``O(n_sources + n_pixels * grid_dim**2)`` instead of
+    ``O(n_pixels * n_sources)``, and never forms an ``n_pixels x n_sources``
+    intermediate, on the backward pass either.
+
+    Parameters
+    ----------
+    lattice : PixelLattice
+        Focal-plane geometry.
+    values : jax.Array, shape (n_pixels, height, width)
+        Pixel response values.
+    coords : jax.Array, shape (n_sources, 2)
+        Source positions in the detector frame, in radians.
+    rates : jax.Array, shape (n_sources,)
+        Band-integrated source rates.
+
+    Returns
+    -------
+    jax.Array, shape (n_pixels,)
+    """
+    n_rows, n_cols = lattice.shape
+    grid_h, grid_w = lattice.grid_shape
+
+    # Rasterise the sources onto the lattice.
+    pos = (coords - lattice.origin) / lattice.step
+    y0, x0, fy, fx, valid = _bilinear_coeffs(pos[:, 0], pos[:, 1], n_rows, n_cols)
+    masked = jnp.where(valid, rates, 0.0)
+
+    corner = y0 * n_cols + x0
+    idx = jnp.stack([corner, corner + 1, corner + n_cols, corner + n_cols + 1], axis=-1)
+    weights = (
+        jnp.stack([(1 - fy) * (1 - fx), (1 - fy) * fx, fy * (1 - fx), fy * fx], axis=-1)
+        * masked[:, None]
     )
+    raster = (
+        jnp.zeros(n_rows * n_cols, dtype=weights.dtype).at[idx.reshape(-1)].add(weights.reshape(-1))
+    )
+
+    # Integrate each pixel's window of the raster against its response.
+    window = (jnp.arange(grid_h)[:, None] * n_cols + jnp.arange(grid_w)[None, :]).astype(jnp.int32)
+    base = lattice.offset[:, 0] * n_cols + lattice.offset[:, 1]
+    patch = raster[base[:, None, None] + window[None]]
+    return jnp.sum(values * patch, axis=(1, 2))
+
+
+@cache
+def _simpson_weights(n: int) -> np.ndarray:
+    """Quadrature weights reproducing ``scipy`` Simpson on a unit-spaced axis.
+
+    Simpson's rule is a linear functional of the samples, so on a uniform
+    axis it collapses to a fixed weight vector -- recovered here by
+    integrating the identity matrix, which keeps scipy's handling of an even
+    sample count rather than reimplementing it.
+    """
+    return simpson(np.eye(n), dx=1.0, axis=-1)
+
+
+def integrate_response(lattice: PixelLattice, values):
+    """Integrate each pixel's response over solid angle.
+
+    Parameters
+    ----------
+    lattice : PixelLattice
+        Supplies the (uniform) node spacing along each axis.
+    values : array, shape (..., n_pixels, height, width)
+        Pixel response values.
+
+    Returns
+    -------
+    jax.Array, shape ``values.shape[:-2]``
+        Simpson-integrated weight per pixel.
+    """
+    height, width = lattice.grid_shape
+    if values.shape[-2:] != (height, width):
+        raise ValueError(f"response is {values.shape[-2:]}, lattice window is {(height, width)}")
+    wy = jnp.asarray(_simpson_weights(height)) * lattice.step[0]
+    wx = jnp.asarray(_simpson_weights(width)) * lattice.step[1]
+    return jnp.einsum("...jk,j,k->...", values, wy, wx)
+
+
+# Regular-grid interpolation
 
 
 def interpolate_regular_grid(x, y, x0, x_step, nx, y0, y_step, ny, data):
@@ -127,14 +368,29 @@ def interpolate_regular_grid(x, y, x0, x_step, nx, y0, y_step, ny, data):
 
 
 def interpolate_pixel_rates(Xi, Yi, values, coords):
-    """Bilinear interpolation of gridded values at arbitrary coordinates."""
+    """Bilinear interpolation of gridded values at arbitrary coordinates.
+
+    Contracts against the whole grid with separable hat weights rather
+    than gathering four corners.  The FOV eval grid is tiny (``ngrid``
+    cells per axis), so the contraction is cheap, and it keeps the
+    backward pass a reduction: gathering instead makes the transpose a
+    scatter of ``n_pixels`` updates into ``ngrid ** 2`` addresses, whose
+    atomic contention costs more than the forward pass by an order of
+    magnitude.
+    """
     height, width = values.shape
     ystart, ystep = Yi[0], Yi[1] - Yi[0]
     xstart, xstep = Xi[0], Xi[1] - Xi[0]
 
-    x_coords = (coords[:, 0] - xstart) / xstep
-    y_coords = (coords[:, 1] - ystart) / ystep
+    y_coords = (coords[:, 0] - ystart) / ystep
+    x_coords = (coords[:, 1] - xstart) / xstep
+    valid_mask = (
+        (y_coords >= 0) & (y_coords < height - 1) & (x_coords >= 0) & (x_coords < width - 1)
+    )
 
-    y0, x0, fy, fx, valid_mask = _bilinear_coeffs(y_coords, x_coords, height, width)
-    interpolated = _bilinear_sample(values, y0, x0, fy, fx)
+    # Hat weights: max(0, 1 - |c - i|) reproduces the four-corner bilinear
+    # weights exactly, and vanishes on every other node.
+    wy = jnp.maximum(1.0 - jnp.abs(y_coords[:, None] - jnp.arange(height)), 0.0)
+    wx = jnp.maximum(1.0 - jnp.abs(x_coords[:, None] - jnp.arange(width)), 0.0)
+    interpolated = jnp.sum((wy @ values) * wx, axis=1)
     return jnp.where(valid_mask, interpolated, 0.0)

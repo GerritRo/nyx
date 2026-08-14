@@ -4,10 +4,20 @@ import h5py
 import numpy as np
 from scipy.interpolate import interp1d
 
+from nyx.instrument._interpolation import PixelLattice
+
 try:
     import astropy.units as u
 except ImportError:
     u = None
+
+
+#: The only instrument file format nyx reads or writes.  It stores the
+#: focal-plane geometry as the lattice the pixel response grids are windows
+#: onto -- an origin, a step, and one integer node offset per pixel -- rather
+#: than as an explicit ``(n_pixels, 2, grid_dim)`` table of coordinates.
+#: Convert files written before 2.0 with ``scripts/migrate_instrument.py``.
+FORMAT_VERSION = "2.0"
 
 
 # Shared helpers
@@ -27,7 +37,7 @@ def _load_bandpass(f):
 
 
 def _save_common(f, inst, wavelength_range, wavelength_samples, metadata):
-    """Write bandpass, grid, and metadata shared by all instrument types."""
+    """Write bandpass, lattice, and metadata shared by all instrument types."""
     wvl_tab = np.linspace(wavelength_range[0], wavelength_range[1], wavelength_samples)
     if u is not None:
         bandpass_tab = inst._bandpass_func(wvl_tab * u.nm)
@@ -37,7 +47,11 @@ def _save_common(f, inst, wavelength_range, wavelength_samples, metadata):
     bp_grp = f.create_group("bandpass")
     bp_grp.create_dataset("wavelength", data=wvl_tab)
     bp_grp.create_dataset("transmission", data=bandpass_tab)
-    f.create_dataset("grid", data=np.asarray(inst.grid))
+
+    lat_grp = f.create_group("lattice")
+    lat_grp.create_dataset("origin", data=np.asarray(inst.lattice.origin, dtype=np.float64))
+    lat_grp.create_dataset("step", data=np.asarray(inst.lattice.step, dtype=np.float64))
+    lat_grp.create_dataset("offset", data=np.asarray(inst.lattice.offset, dtype=np.int32))
 
     if metadata is not None:
         meta_grp = f.create_group("metadata")
@@ -85,15 +99,14 @@ def save_instrument(
             f.create_dataset("values", data=np.asarray(inst.all_pixel_values))
             f.create_dataset("sigma_x_coords", data=np.asarray(inst.sigma_x_coords))
             f.create_dataset("sigma_y_coords", data=np.asarray(inst.sigma_y_coords))
-            f.attrs["nyx_instrument_version"] = "1.1"
             f.attrs["instrument_type"] = "EffectiveApertureMisalignmentInstrument"
         else:
             f.create_dataset("values", data=np.asarray(inst.pixel_values))
-            f.attrs["nyx_instrument_version"] = "1.0"
             f.attrs["instrument_type"] = "EffectiveApertureInstrument"
+        f.attrs["nyx_instrument_version"] = FORMAT_VERSION
 
 
-def load_instrument(filepath, geo, batch_size=None):
+def load_instrument(filepath, geo):
     """Load any instrument from HDF5 file.
 
     Dispatches on the ``instrument_type`` attribute stored in the file.
@@ -101,14 +114,10 @@ def load_instrument(filepath, geo, batch_size=None):
     Parameters
     ----------
     filepath : str or Path
-        Path to HDF5 file.
+        Path to an HDF5 file in format :data:`FORMAT_VERSION`.  Convert
+        older files with ``scripts/migrate_instrument.py``.
     geo : Geometry
         Resolution configuration.
-    batch_size : int or None
-        Pixel-chunk size used by ``project_catalog``.  See
-        :func:`nyx.instrument._interpolation.compute_pixel_weights`
-        for semantics.  ``None`` (default) is fully parallel over
-        pixels.
 
     Returns
     -------
@@ -116,12 +125,23 @@ def load_instrument(filepath, geo, batch_size=None):
     """
     filepath = Path(filepath)
     with h5py.File(filepath, "r") as f:
-        if "nyx_instrument_version" not in f.attrs:
-            raise ValueError("Not a valid nyx instrument file")
+        version = str(f.attrs.get("nyx_instrument_version", ""))
+        if not version:
+            raise ValueError(f"{filepath} is not a nyx instrument file")
+        if not version.startswith("2."):
+            raise ValueError(
+                f"{filepath} is format {version}; convert it to {FORMAT_VERSION} with "
+                f"scripts/migrate_instrument.py"
+            )
         itype = f.attrs.get("instrument_type", "EffectiveApertureInstrument")
         bandpass_func = _load_bandpass(f)
-        grid = f["grid"][:]
         values = f["values"][:]
+        geometry = PixelLattice(
+            origin=f["lattice/origin"][:],
+            step=f["lattice/step"][:],
+            offset=f["lattice/offset"][:],
+            grid_shape=values.shape[-2:],
+        )
 
         if itype == "EffectiveApertureMisalignmentInstrument":
             sigma_x_coords = f["sigma_x_coords"][:]
@@ -135,13 +155,12 @@ def load_instrument(filepath, geo, batch_size=None):
         return EffectiveApertureMisalignmentInstrument(
             geo,
             bandpass_func,
-            grid,
+            geometry,
             values,
             sigma_x_coords,
             sigma_y_coords,
-            batch_size=batch_size,
         )
 
     from nyx.instrument.effective_aperture import EffectiveApertureInstrument
 
-    return EffectiveApertureInstrument(geo, bandpass_func, grid, values, batch_size=batch_size)
+    return EffectiveApertureInstrument(geo, bandpass_func, geometry, values)

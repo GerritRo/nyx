@@ -93,6 +93,7 @@ class Optimizer:
         self._is_ls = isinstance(solver, optx.AbstractLeastSquaresSolver)
         self._fn_user = fn
         self._fn_is_scalar: bool | None = None  # resolved on first call to _check_fn
+        self._inner: Callable[..., Any] | None = None  # built once; see _make_inner
 
     def _check_fn(self, model: Any) -> None:
         """Probe fn output shape and cache _fn_is_scalar. Call with a concrete model."""
@@ -109,21 +110,34 @@ class Optimizer:
         self._fn_is_scalar = fn_is_scalar
 
     def _make_inner(self, model: Any) -> tuple[Callable[..., Any], Any, Any]:
-        """Partition *model* and build the inner fn for optimistix."""
+        """Partition *model* and return the inner fn for optimistix.
+
+        The inner function is built once and reused, and the frozen part
+        of *model* is handed to optimistix as ``args`` rather than closed
+        over.  Both matter for compile time: optimistix jits on the
+        identity of the function it is given, so a fresh closure per call
+        recompiles the whole solver, and arrays captured in a closure
+        become compile-time constants, so a solver compiled for one
+        frozen model cannot be reused for another.  Passing them as
+        ``args`` keeps them traced, so repeated fits over changing data
+        (or light curves) compile once.
+        """
         diff, static = eqx.partition(model, _is_trainable, is_leaf=_is_param)
-        fn_user = self._fn_user
-        user_fn: Callable[[Any], Any]
-        if not self._is_ls and not self._fn_is_scalar:
+        if self._inner is None:
+            fn_user = self._fn_user
+            user_fn: Callable[[Any], Any]
+            if not self._is_ls and not self._fn_is_scalar:
 
-            def user_fn(m: Any) -> Any:
-                return _sum_of_squares(fn_user(m))
-        else:
-            user_fn = fn_user
+                def user_fn(m: Any) -> Any:
+                    return _sum_of_squares(fn_user(m))
+            else:
+                user_fn = fn_user
 
-        def inner(diff: Any, args: Any) -> tuple[Any, None]:
-            return user_fn(eqx.combine(diff, static, is_leaf=_is_param)), None
+            def inner(diff: Any, args: Any) -> tuple[Any, None]:
+                return user_fn(eqx.combine(diff, args, is_leaf=_is_param)), None
 
-        return inner, diff, static
+            self._inner = inner
+        return self._inner, diff, static
 
     def init_state(self, model: Any) -> Any:
         """Compute the initial solver state for manual stepping.
@@ -139,10 +153,10 @@ class Optimizer:
             Pass as *state* to the first :meth:`step` call.
         """
         self._check_fn(model)
-        inner, diff, _ = self._make_inner(model)
-        f_struct = jax.eval_shape(lambda: inner(diff, None)[0])
+        inner, diff, static = self._make_inner(model)
+        f_struct = jax.eval_shape(lambda: inner(diff, static)[0])
         aux_struct = None
-        return self._solver.init(inner, diff, None, {}, f_struct, aux_struct, frozenset())
+        return self._solver.init(inner, diff, static, {}, f_struct, aux_struct, frozenset())
 
     def step[T](self, model: T, state: Any) -> tuple[T, jax.Array, Any]:
         """One solver step.
@@ -174,7 +188,7 @@ class Optimizer:
             loss = self._fn_user(model)
         else:
             loss = _sum_of_squares(self._fn_user(model))
-        new_diff, new_state, _ = self._solver.step(inner, diff, None, {}, state, frozenset())
+        new_diff, new_state, _ = self._solver.step(inner, diff, static, {}, state, frozenset())
         new_model = eqx.combine(new_diff, static, is_leaf=_is_param)
         return new_model, loss, new_state
 
@@ -213,7 +227,7 @@ class Optimizer:
             inner,
             self._solver,
             diff,
-            args=None,
+            args=static,
             has_aux=True,
             max_steps=max_steps,
             throw=throw,

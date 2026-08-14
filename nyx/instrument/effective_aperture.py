@@ -8,18 +8,27 @@ import jax.numpy as jnp
 # Load jax_healpy and force to float 32
 import jax_healpy as jhp  # noqa: E402
 import numpy as np
-from scipy.integrate import simpson as simps
 
 from nyx.core.coordinates import offset_to_altaz
 from nyx.core.parameter import Parameter
 from nyx.core.protocols import InstrumentModel
 from nyx.instrument._interpolation import (
-    compute_pixel_weights,
+    PixelLattice,
+    integrate_response,
     interpolate_pixel_rates,
     interpolate_regular_grid,
+    project_lattice,
 )
 
 jax.config.update("jax_enable_x64", False)
+
+
+def _as_lattice(grid, values) -> PixelLattice:
+    """Accept either a :class:`PixelLattice` or explicit sample coordinates."""
+    if isinstance(grid, PixelLattice):
+        return grid
+    return PixelLattice.from_grid(grid, values)
+
 
 # Base class
 
@@ -31,15 +40,23 @@ class _BaseApertureInstrument(InstrumentModel):
     bandpass_values: eqx.AbstractVar[jax.Array]
     shift: eqx.AbstractVar[Parameter]
     rotation: eqx.AbstractVar[Parameter]
-    centers: eqx.AbstractVar[jax.Array]
     _eval_grid: eqx.AbstractVar[jax.Array]
-    grid: eqx.AbstractVar[jax.Array]
-    batch_size: eqx.AbstractVar[int | None]
+    lattice: eqx.AbstractVar[PixelLattice]
 
     @property
     def bandpass(self):
         """Spectral transmission curve (no efficiency). Shape [n_wvl]."""
         return self.bandpass_values
+
+    @property
+    def centers(self):
+        """Pixel centres in the offset frame. Shape [n_pix, 2]."""
+        return self.lattice.centers
+
+    @property
+    def grid(self):
+        """Per-pixel response sample coordinates. Shape [n_pix, 2, grid_dim]."""
+        return self.lattice.grid
 
     def _correction_matrix(self):
         """3x3 correction matrix mapping the nominal offset frame to the
@@ -164,16 +181,13 @@ class _BaseApertureInstrument(InstrumentModel):
         -------
         rates : shape [n_pixels]
         """
-        return (
-            compute_pixel_weights(
-                self.grid,
-                self.pixel_values,
-                source_coords,
-                source_fluxes,
-                batch_size=self.batch_size,
-            )
-            * self.pixel_efficiency.value
+        weights = project_lattice(
+            self.lattice,
+            self.pixel_values,
+            source_coords,
+            source_fluxes,
         )
+        return weights * self.pixel_efficiency.value
 
     def save(self, filepath, wavelength_range=(200, 1000), wavelength_samples=1000, metadata=None):
         """Save instrument to HDF5 file.
@@ -185,7 +199,7 @@ class _BaseApertureInstrument(InstrumentModel):
         save_instrument(self, filepath, wavelength_range, wavelength_samples, metadata)
 
     @classmethod
-    def load(cls, filepath, geo, batch_size=None):
+    def load(cls, filepath, geo):
         """Load instrument from HDF5 file.
 
         Delegates to :func:`nyx.instrument.io.load_instrument`.
@@ -194,10 +208,6 @@ class _BaseApertureInstrument(InstrumentModel):
         ----------
         filepath : str or Path
         geo : Geometry
-        batch_size : int or None
-            Pixel-chunk size for ``project_catalog``.  See
-            :func:`nyx.instrument._interpolation.compute_pixel_weights`
-            for semantics.
 
         Returns
         -------
@@ -205,7 +215,7 @@ class _BaseApertureInstrument(InstrumentModel):
         """
         from nyx.instrument.io import load_instrument
 
-        return load_instrument(filepath, geo, batch_size=batch_size)
+        return load_instrument(filepath, geo)
 
 
 # Effective-aperture instrument
@@ -234,18 +244,16 @@ class EffectiveApertureInstrument(_BaseApertureInstrument):
     rotation: Parameter
 
     # Frozen pixel geometry
-    centers: jax.Array  # [n_pix, 2]
+    lattice: PixelLattice
     _weight: jax.Array  # [n_pix]
-    grid: jax.Array  # [n_pix, 2, grid_dim]
     _pixel_values: jax.Array  # [n_pix, grid_dim, grid_dim]
     bandpass_values: jax.Array  # [n_wvl]
     _eval_grid: jax.Array  # (ngrid,)
 
     # Fields with defaults last (eqx.field() or explicit default)
     _bandpass_func: Callable = eqx.field(static=True)
-    batch_size: int | None = eqx.field(static=True, default=None)
 
-    def __init__(self, geo, bandpass, grid, values, batch_size=None):
+    def __init__(self, geo, bandpass, grid, values):
         """
         Parameters
         ----------
@@ -253,32 +261,22 @@ class EffectiveApertureInstrument(_BaseApertureInstrument):
             Resolution configuration (provides wavelengths, FOV grid).
         bandpass : callable
             Function mapping wavelength Quantity -> transmission.
-        grid : array, shape (n_pixels, 2, grid_dim)
-            Pixel sub-grid coordinates in radians.
+        grid : array, shape (n_pixels, 2, grid_dim), or PixelLattice
+            Pixel sub-grid coordinates in radians, from which the shared
+            response lattice is recovered; or that lattice directly.
         values : array, shape (n_pixels, grid_dim, grid_dim)
             Pixel response values at sub-grid points.
-        batch_size : int or None
-            Pixel-chunk size used by ``project_catalog``.  See
-            :func:`nyx.instrument._interpolation.compute_pixel_weights`
-            for semantics.  ``None`` is fully parallel over pixels.
         """
-        grid = np.asarray(grid)
         values = np.asarray(values)
 
         self.efficiency = Parameter.from_value(1.0, scale=1.0)
-        self.pixel_efficiency = Parameter.from_value(jnp.ones(len(grid)), scale=1.0)
+        self.pixel_efficiency = Parameter.from_value(jnp.ones(values.shape[0]), scale=1.0)
         self.shift = Parameter.from_value(jnp.zeros(2), scale=1e-3, per_obs=True)
         self.rotation = Parameter.from_value(jnp.array([0.0]), scale=1e-2, per_obs=True)
-        self.batch_size = batch_size
 
-        self.centers = jnp.asarray(np.mean(grid, axis=2))
-        # values[i] is indexed [lon, lat], so the inner (last-axis) integral
-        # runs over lat and the outer one over lon.
-        self._weight = jnp.asarray(
-            np.array([simps(simps(values[i], grid[i][1]), grid[i][0]) for i in range(len(grid))])
-        )
-        self.grid = jnp.asarray(grid)
+        self.lattice = _as_lattice(grid, values)
         self._pixel_values = jnp.asarray(values)
+        self._weight = integrate_response(self.lattice, self._pixel_values)
         self._bandpass_func = bandpass
 
         wvls = geo.wvls
@@ -331,14 +329,12 @@ class EffectiveApertureMisalignmentInstrument(_BaseApertureInstrument):
     sigma_y: Parameter
 
     # Frozen pixel geometry
-    centers: jax.Array  # [n_pix, 2]
-    grid: jax.Array  # [n_pix, 2, grid_dim]
+    lattice: PixelLattice
     bandpass_values: jax.Array  # [n_wvl]
     _eval_grid: jax.Array  # (ngrid,)
 
     # 5-D response table and sigma grid metadata
     all_pixel_values: jax.Array  # [Nsigma_x, Nsigma_y, npix, Nx, Ny]
-    all_weights: jax.Array  # [Nsigma_x, Nsigma_y, npix]
     sigma_x_coords: jax.Array  # [Nsigma_x]
     sigma_y_coords: jax.Array  # [Nsigma_y]
 
@@ -350,7 +346,6 @@ class EffectiveApertureMisalignmentInstrument(_BaseApertureInstrument):
     _sy0: float = eqx.field(static=True)
     _sy_step: float = eqx.field(static=True)
     _nsy: int = eqx.field(static=True)
-    batch_size: int | None = eqx.field(static=True, default=None)
 
     def __init__(
         self,
@@ -362,7 +357,6 @@ class EffectiveApertureMisalignmentInstrument(_BaseApertureInstrument):
         sigma_y_coords,
         sigma_x_init=0.0,
         sigma_y_init=0.0,
-        batch_size=None,
     ):
         """
         Parameters
@@ -371,8 +365,9 @@ class EffectiveApertureMisalignmentInstrument(_BaseApertureInstrument):
             Resolution configuration (provides wavelengths, FOV grid).
         bandpass : callable
             Function mapping wavelength Quantity -> transmission.
-        grid : array, shape (n_pixels, 2, grid_dim)
-            Pixel sub-grid coordinates in radians.
+        grid : array, shape (n_pixels, 2, grid_dim), or PixelLattice
+            Pixel sub-grid coordinates in radians, from which the shared
+            response lattice is recovered; or that lattice directly.
         all_values : array, shape (Nsigma_x, Nsigma_y, n_pixels, Nx, Ny)
             Pixel response values for each sigma combination.
         sigma_x_coords : array, shape (Nsigma_x,)
@@ -381,28 +376,21 @@ class EffectiveApertureMisalignmentInstrument(_BaseApertureInstrument):
             Regularly-spaced sigma_y grid values.
         sigma_x_init, sigma_y_init : float
             Initial misalignment parameter values.
-        batch_size : int or None
-            Pixel-chunk size used by ``project_catalog``.  See
-            :func:`nyx.instrument._interpolation.compute_pixel_weights`
-            for semantics.  ``None`` is fully parallel over pixels.
         """
-        grid = np.asarray(grid)
         all_values = np.asarray(all_values)
         sigma_x_coords = np.asarray(sigma_x_coords, dtype=np.float64)
         sigma_y_coords = np.asarray(sigma_y_coords, dtype=np.float64)
 
         # Trainable parameters
         self.efficiency = Parameter.from_value(1.0, scale=1.0)
-        self.pixel_efficiency = Parameter.from_value(jnp.ones(grid.shape[0]), scale=1.0)
+        self.pixel_efficiency = Parameter.from_value(jnp.ones(all_values.shape[2]), scale=1.0)
         self.shift = Parameter.from_value(jnp.zeros(2), scale=1e-3, per_obs=True)
         self.rotation = Parameter.from_value(jnp.array([0.0]), scale=1e-2, per_obs=True)
         self.sigma_x = Parameter.from_value(float(sigma_x_init), scale=1.0)
         self.sigma_y = Parameter.from_value(float(sigma_y_init), scale=1.0)
-        self.batch_size = batch_size
 
         # Frozen pixel geometry
-        self.centers = jnp.asarray(np.mean(grid, axis=2))
-        self.grid = jnp.asarray(grid)
+        self.lattice = _as_lattice(grid, all_values)
 
         # 5-D response table
         self.all_pixel_values = jnp.asarray(all_values)
@@ -418,19 +406,6 @@ class EffectiveApertureMisalignmentInstrument(_BaseApertureInstrument):
         self._sy0 = float(sigma_y_coords[0])
         self._sy_step = float(sigma_y_coords[1] - sigma_y_coords[0]) if nsy > 1 else 1.0
         self._nsy = nsy
-
-        # Pre-compute Simpson-integrated weights for every sigma combination
-        n_pix = grid.shape[0]
-        weights = np.zeros((nsx, nsy, n_pix))
-        for isx in range(nsx):
-            for isy in range(nsy):
-                weights[isx, isy] = np.array(
-                    [
-                        simps(simps(all_values[isx, isy, i], grid[i][1]), grid[i][0])
-                        for i in range(n_pix)
-                    ]
-                )
-        self.all_weights = jnp.asarray(weights)
 
         # Bandpass
         self._bandpass_func = bandpass
@@ -462,5 +437,10 @@ class EffectiveApertureMisalignmentInstrument(_BaseApertureInstrument):
 
     @property
     def weight(self):
-        """Simpson-integrated pixel weight at current misalignment. Shape [npix]."""
-        return self._interp(self.all_weights)
+        """Simpson-integrated pixel weight at current misalignment. Shape [npix].
+
+        Integrating the sigma-interpolated response is exactly equivalent to
+        interpolating pre-integrated weights -- both the quadrature and the
+        sigma blend are linear -- so no separate weight table is stored.
+        """
+        return integrate_response(self.lattice, self.pixel_values)
