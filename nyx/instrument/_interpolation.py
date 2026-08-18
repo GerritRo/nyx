@@ -388,8 +388,6 @@ def interpolate_pixel_rates(Xi, Yi, values, coords):
         (y_coords >= 0) & (y_coords < height - 1) & (x_coords >= 0) & (x_coords < width - 1)
     )
 
-    # Hat weights: max(0, 1 - |c - i|) reproduces the four-corner bilinear
-    # weights exactly, and vanishes on every other node.
     wy = jnp.maximum(1.0 - jnp.abs(y_coords[:, None] - jnp.arange(height)), 0.0)
     wx = jnp.maximum(1.0 - jnp.abs(x_coords[:, None] - jnp.arange(width)), 0.0)
     interpolated = jnp.sum((wy @ values) * wx, axis=1)

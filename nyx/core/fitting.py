@@ -239,7 +239,7 @@ class Optimizer:
         self,
         fitted: T,
         *,
-        batch_size: int = 32,
+        batch_size: int = 8,
         reduced_chi2: bool = False,
         rcond: float | None = None,
     ) -> T:
@@ -297,7 +297,7 @@ def parameter_errors[T](
     fitted: T,
     residuals_fn: Callable[[Any], Any],
     *,
-    batch_size: int = 1,
+    batch_size: int = 8,
     reduced_chi2: bool = False,
     rcond: float | None = None,
 ) -> T:
