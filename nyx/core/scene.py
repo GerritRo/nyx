@@ -212,6 +212,19 @@ class Scene(eqx.Module):
             _obs_bundles=obs_bundles,
         )
 
+    def _render_frame(self, inst_name: str) -> _RenderFrame:
+        """Combine the shared sky with one instrument's observation data.).
+        """
+        bundle = self._obs_bundles[inst_name]
+        od = bundle.obs_data
+        return _RenderFrame(
+            atmosphere=self.atmosphere,
+            sources=[(self.sources[n], od[n]) for n in od],
+            instrument=self.instruments[inst_name],
+            render_geometry=bundle.render_geometry,
+            nobs=bundle.nobs,
+        )
+
     def render(self) -> dict[str, jax.Array]:
         """Render all observations to pixel rates.
 
@@ -281,6 +294,41 @@ class Scene(eqx.Module):
             wrapped,
         )
 
+    def sky_view(
+        self,
+        instrument: str | None = None,
+        obs: int = 0,
+        **kwargs: Any,
+    ) -> Any:
+        """Band-integrated hemisphere maps of every emitter, for plotting.
+
+        Evaluates the same diffuse maps and scattering kernel the render
+        loop uses, but over the whole sky rather than the field of view,
+        and integrates them against the instrument bandpass::
+
+            scene.sky_view().plot()
+
+        Parameters
+        ----------
+        instrument : str, optional
+            Instrument whose passband and pointing are used; defaults to
+            the sole instrument.
+        obs : int
+            Observation index (default: the first).
+        **kwargs
+            Forwarded to :func:`nyx.core.skyview.sky_view` (``indirect``,
+            ``point_sources``, ``nside``, ``chunk``).
+
+        Returns
+        -------
+        SkyView
+            Per-emitter ``direct`` and ``indirect`` HEALPix maps in
+            ``photon / s / sr``.
+        """
+        from nyx.core.skyview import sky_view
+
+        return sky_view(self, instrument, obs, **kwargs)
+
     def set_lightcurve(
         self,
         index: int,
@@ -347,6 +395,20 @@ class Scene(eqx.Module):
         return eqx.tree_at(lambda s: s._obs_bundles[inst], self, new_bundle)
 
     def _resolve_lightcurve_instrument(self, instrument: str | None) -> str:
+        if instrument is not None:
+            if instrument not in self._obs_bundles:
+                raise KeyError(
+                    f"{instrument!r} is not an instrument; choices: {list(self._obs_bundles)}"
+                )
+            return instrument
+        if len(self._obs_bundles) == 1:
+            return next(iter(self._obs_bundles))
+        raise ValueError(
+            f"scene has multiple instruments {list(self._obs_bundles)}; pass instrument=..."
+        )
+
+    def _resolve_instrument(self, instrument: str | None) -> str:
+        """Validate an instrument name, or fall back to the only one."""
         if instrument is not None:
             if instrument not in self._obs_bundles:
                 raise KeyError(
