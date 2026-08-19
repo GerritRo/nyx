@@ -31,6 +31,13 @@ class Geometry:
         fov: float | u.Quantity,
     ) -> None:
         self.wvls = to_wavelength_nm(wvls)
+        wvl_arr = np.asarray(self.wvls)
+        if wvl_arr.ndim != 1 or wvl_arr.size < 2:
+            raise ValueError(
+                f"wvls must be a 1-D grid of at least 2 points, got shape {wvl_arr.shape}"
+            )
+        if not np.all(np.diff(wvl_arr) > 0):
+            raise ValueError("wvls must be strictly monotonically increasing")
         self.nside = nside
         self.ngrid = ngrid
         self.fov = to_angle_rad(fov)

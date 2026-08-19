@@ -9,9 +9,10 @@ import jax.numpy as jnp
 import jax_healpy as jhp  # noqa: E402
 import numpy as np
 
-from nyx.core.coordinates import offset_to_altaz
+from nyx.core.coordinates import offset_to_altaz, safe_arcsin
 from nyx.core.parameter import Parameter
 from nyx.core.protocols import InstrumentModel
+from nyx.core.spectral import bin_widths
 from nyx.instrument._interpolation import (
     PixelLattice,
     integrate_response,
@@ -41,6 +42,7 @@ class _BaseApertureInstrument(InstrumentModel):
     shift: eqx.AbstractVar[Parameter]
     rotation: eqx.AbstractVar[Parameter]
     _eval_grid: eqx.AbstractVar[jax.Array]
+    _horizon_theta: eqx.AbstractVar[float]
     lattice: eqx.AbstractVar[PixelLattice]
 
     @property
@@ -108,13 +110,14 @@ class _BaseApertureInstrument(InstrumentModel):
         jax.Array, shape (n_pix, 2)
         """
         dR_inv = self._correction_matrix().T  # orthogonal inverse
+        # Lattice axis 0 is longitude
         lon, lat = self.centers[:, 0], self.centers[:, 1]
         p = jnp.stack(
             [jnp.cos(lat) * jnp.cos(lon), jnp.cos(lat) * jnp.sin(lon), jnp.sin(lat)], axis=-1
         )
         p_nom = jnp.einsum("ij,...j->...i", dR_inv, p)
         nom_lon = jnp.arctan2(p_nom[..., 1], p_nom[..., 0])
-        nom_lat = jnp.arcsin(jnp.clip(p_nom[..., 2], -1.0, 1.0))
+        nom_lat = safe_arcsin(p_nom[..., 2])
         return jnp.stack([nom_lon, nom_lat], axis=-1)
 
     def project_scattered(self, eval_grid_values):
@@ -126,13 +129,16 @@ class _BaseApertureInstrument(InstrumentModel):
 
         Parameters
         ----------
-        eval_grid_values : shape [grid_y, grid_x]
+        eval_grid_values : shape [n_lat, n_lon]
+            The FOV evaluation grid, laid out row-by-latitude and
+            column-by-longitude; see :func:`interpolate_pixel_rates`,
+            which is where that pairing is enforced.
 
         Returns
         -------
         rates : shape [n_pixels]
         """
-        centers_nom = self._nominal_centers()
+        centers_nom = self._nominal_centers()  # [lon, lat] per pixel
         rates = interpolate_pixel_rates(
             self._eval_grid,
             self._eval_grid,
@@ -158,9 +164,10 @@ class _BaseApertureInstrument(InstrumentModel):
         rates : shape [n_pixels]
         """
         R = self.corrected_pm(pm)
+        # Lattice axis 0 is longitude
         lon, lat = self.centers[:, 0], self.centers[:, 1]
         az, alt = offset_to_altaz(lon, lat, R)
-        theta = jnp.pi / 2 - alt
+        theta = jnp.minimum(jnp.pi / 2 - alt, self._horizon_theta)
         phi = az
         rates = jhp.get_interp_val(hp_values, theta, phi)
         return rates * self.weight * self.pixel_efficiency.value
@@ -252,6 +259,7 @@ class EffectiveApertureInstrument(_BaseApertureInstrument):
 
     # Fields with defaults last (eqx.field() or explicit default)
     _bandpass_func: Callable = eqx.field(static=True)
+    _horizon_theta: float = eqx.field(static=True)
 
     def __init__(self, geo, bandpass, grid, values):
         """
@@ -280,9 +288,10 @@ class EffectiveApertureInstrument(_BaseApertureInstrument):
         self._bandpass_func = bandpass
 
         wvls = geo.wvls
-        bp_values = bandpass(np.asarray(wvls) * u.nm) * np.diff(np.asarray(wvls)).mean()
+        bp_values = bandpass(np.asarray(wvls) * u.nm) * np.asarray(bin_widths(wvls))
         self.bandpass_values = jnp.asarray(bp_values)
         self._eval_grid = jnp.asarray(np.linspace(-geo.fov, geo.fov, geo.ngrid))
+        self._horizon_theta = float(np.pi / 2 - np.min(geo.lat))
 
     @property
     def weight(self):
@@ -340,6 +349,7 @@ class EffectiveApertureMisalignmentInstrument(_BaseApertureInstrument):
 
     # Fields with defaults last (eqx.field() or explicit default)
     _bandpass_func: Callable = eqx.field(static=True)
+    _horizon_theta: float = eqx.field(static=True)
     _sx0: float = eqx.field(static=True)
     _sx_step: float = eqx.field(static=True)
     _nsx: int = eqx.field(static=True)
@@ -410,11 +420,12 @@ class EffectiveApertureMisalignmentInstrument(_BaseApertureInstrument):
         # Bandpass
         self._bandpass_func = bandpass
         wvls = geo.wvls
-        bp_values = bandpass(np.asarray(wvls) * u.nm) * np.diff(np.asarray(wvls)).mean()
+        bp_values = bandpass(np.asarray(wvls) * u.nm) * np.asarray(bin_widths(wvls))
         self.bandpass_values = jnp.asarray(bp_values)
 
         # FOV eval grid
         self._eval_grid = jnp.asarray(np.linspace(-geo.fov, geo.fov, geo.ngrid))
+        self._horizon_theta = float(np.pi / 2 - np.min(geo.lat))
 
     def _interp(self, data):
         """Interpolate data array at current (sigma_x, sigma_y)."""

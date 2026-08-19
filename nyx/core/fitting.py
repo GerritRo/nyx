@@ -111,16 +111,6 @@ class Optimizer:
 
     def _make_inner(self, model: Any) -> tuple[Callable[..., Any], Any, Any]:
         """Partition *model* and return the inner fn for optimistix.
-
-        The inner function is built once and reused, and the frozen part
-        of *model* is handed to optimistix as ``args`` rather than closed
-        over.  Both matter for compile time: optimistix jits on the
-        identity of the function it is given, so a fresh closure per call
-        recompiles the whole solver, and arrays captured in a closure
-        become compile-time constants, so a solver compiled for one
-        frozen model cannot be reused for another.  Passing them as
-        ``args`` keeps them traced, so repeated fits over changing data
-        (or light curves) compile once.
         """
         diff, static = eqx.partition(model, _is_trainable, is_leaf=_is_param)
         if self._inner is None:
@@ -160,9 +150,6 @@ class Optimizer:
 
     def step[T](self, model: T, state: Any) -> tuple[T, jax.Array, Any]:
         """One solver step.
-
-        Call :meth:`init_state` with a concrete model before JIT-compiling
-        this method so that ``_fn_is_scalar`` is resolved first.
 
         Parameters
         ----------
@@ -245,30 +232,27 @@ class Optimizer:
     ) -> T:
         """1-σ errors on every trainable Parameter at *fitted*.
 
-        Computes the covariance matrix-free (no dense Jacobian
-        materialised) via the Moore–Penrose pseudoinverse of ``JᵀJ``
-        and returns ``sqrt(diag(cov))`` as a pytree with the same
+        Returns ``sqrt(diag(pinv(JᵀJ)))`` as a pytree with the same
         structure as the trainable subset of *fitted*.
 
         Only valid when *fn* returns residuals (least-squares solver, or
-        minimiser with a residuals fn that was auto-wrapped). For a
-        scalar-loss minimiser fit the J^T J formula does not apply;
-        compute a Hessian-based error estimate instead.
+        minimiser with a residuals fn that was auto-wrapped).
 
         Parameters
         ----------
         fitted : pytree
             Model returned by :meth:`run`.
         batch_size : int, optional
-            Columns of ``J^T J`` computed in parallel per chunk.
+            Jacobian columns evaluated per kernel launch.  Larger is not
+            better; see :func:`parameter_errors`.
         reduced_chi2 : bool, optional
             If False (default), assumes residuals are pre-scaled by 1-σ
             uncertainties so ``cov = pinv(J^T J)``.  If True, applies
             the ``(r^T r) / (m - n)`` factor so errors reflect the
             spread consistent with the data.
         rcond : float or None, optional
-            Relative singular-value cutoff for the pseudoinverse.  See
-            :func:`parameter_errors` for details.
+            Cutoff for the pseudoinverse, relative to the largest
+            singular value of ``J``.  See :func:`parameter_errors`.
 
         See :func:`parameter_errors` for the standalone form and full
         docstring.
@@ -293,6 +277,81 @@ class Optimizer:
         )
 
 
+def _jacobian_columns(jvp_fn: Callable[[Any], Any], n: int, m: int, chunk: int) -> jax.Array:
+    """Build ``J^T`` by pushing basis vectors through a linearised model.
+
+    Forward mode only.
+
+    Parameters
+    ----------
+    jvp_fn : callable
+        Linear map from :func:`jax.linearize`.
+    n, m : int
+        Parameter and residual counts.
+    chunk : int
+        Columns evaluated per kernel launch.
+
+    Returns
+    -------
+    jax.Array, shape (n, m)
+    """
+
+    def block(idx: jax.Array) -> jax.Array:
+        return jax.vmap(lambda k: jvp_fn(jax.nn.one_hot(k, n)))(idx)
+
+    # Pad the last block to a uniform shape so it compiles once; the
+    # duplicated columns are dropped below.
+    n_blocks = -(-n // chunk)
+    idx = jnp.minimum(jnp.arange(n_blocks * chunk), n - 1).reshape(n_blocks, chunk)
+    return jax.lax.map(block, idx).reshape(-1, m)[:n]
+
+
+#: Bytes to aim for per float64 operand slice of the ``J^T J`` product.
+_GRAM_SLICE_BYTES = 64 * 1024 * 1024
+
+
+def _gram_matrix(jacobian_t: jax.Array) -> np.ndarray:
+    """
+    ``J^T J`` from ``J^T``, accumulated on the host in float64.
+    """
+    jt = np.asarray(jacobian_t)  # one device-to-host transfer, still float32
+    n, m = jt.shape
+    rows = int(np.clip(_GRAM_SLICE_BYTES // (8 * max(m, 1)), 1, n))
+    out = np.empty((n, n), dtype=np.float64)
+    for i in range(0, n, rows):
+        a = jt[i : i + rows].astype(np.float64)
+        for j in range(0, i + rows, rows):
+            b = a if j == i else jt[j : j + rows].astype(np.float64)
+            block = a @ b.T
+            out[i : i + rows, j : j + rows] = block
+            if j != i:
+                out[j : j + rows, i : i + rows] = block.T
+    return out
+
+
+def _null_space_parameters(diff: Any, null_vectors: np.ndarray, top: int = 3) -> str:
+    """Name the parameters carrying the discarded directions.
+    """
+    if null_vectors.size == 0:
+        return "(none)"
+    weight = (null_vectors**2).sum(axis=1)
+    shares, start = [], 0
+    for path, leaf in jax.tree_util.tree_leaves_with_path(diff):
+        stop = start + int(np.size(leaf))
+        shares.append((float(weight[start:stop].sum()), jax.tree_util.keystr(path)))
+        start = stop
+    total = sum(s for s, _ in shares) or 1.0
+    shares.sort(reverse=True)
+    named = [
+        f"{name.lstrip('.').removesuffix('.factor')} ({100 * s / total:.0f}%)"
+        if s / total >= 0.01
+        else f"{name.lstrip('.').removesuffix('.factor')} (<1%)"
+        for s, name in shares[:top]
+        if s / total > 0.001
+    ]
+    return ", ".join(named) if named else "(spread over many parameters)"
+
+
 def parameter_errors[T](
     fitted: T,
     residuals_fn: Callable[[Any], Any],
@@ -301,7 +360,38 @@ def parameter_errors[T](
     reduced_chi2: bool = False,
     rcond: float | None = None,
 ) -> T:
-    """Get parameter errors via jacobian"""
+    """1-σ errors on every trainable Parameter, from the Gauss-Newton covariance.
+
+    Builds the Jacobian one block of columns at a time, forms ``J^T J``
+    in float64, and returns ``sqrt(diag(pinv(J^T J)))`` shaped like the
+    trainable subset of *fitted*.
+
+    Parameters
+    ----------
+    fitted : pytree
+        Model to linearise about.
+    residuals_fn : callable
+        ``(model) -> residuals``, pre-scaled by 1-σ uncertainties.
+    batch_size : int, optional
+        Jacobian columns per kernel launch.  Larger is not better: past a
+        few dozen the per-column intermediates stop fitting in cache and
+        throughput collapses.
+    reduced_chi2 : bool, optional
+        If False (default), assumes residuals are pre-scaled by 1-σ
+        uncertainties so ``cov = pinv(J^T J)``.  If True, applies the
+        ``(r^T r) / (m - n)`` factor.
+    rcond : float or None, optional
+        Cutoff for the pseudoinverse, relative to the largest singular
+        value of ``J``.  Defaults to ``n * eps`` of the Jacobian's dtype,
+        following :func:`numpy.linalg.pinv`: below that a direction is
+        indistinguishable from the rounding error in ``J`` itself, so it
+        is treated as unidentifiable and given zero error.
+
+    Returns
+    -------
+    pytree
+        1-σ errors, shaped like the trainable subset of *fitted*.
+    """
     diff, static = eqx.partition(fitted, _is_trainable, is_leaf=_is_param)
     flat, unravel = fu.ravel_pytree(diff)
     n = flat.size
@@ -311,54 +401,71 @@ def parameter_errors[T](
 
     # Linearise once; jvp_fn is a pure linear operator, no retracing.
     r0, jvp_fn = jax.linearize(residuals_of_flat, flat)
-    vjp_fn = jax.linear_transpose(jvp_fn, flat)  # y -> (J^T y,)
+    jacobian_t = _jacobian_columns(jvp_fn, n, r0.size, max(int(batch_size), 1))
+    JtJ = _gram_matrix(jacobian_t)
 
-    def jtj_col(e: jax.Array) -> jax.Array:
-        (JtJe,) = vjp_fn(jvp_fn(e))
-        return JtJe
+    # Eigendecomposition in float64 on the host:
+    eigvals, eigvecs = np.linalg.eigh(JtJ)
+    eigvals = np.clip(eigvals, 0.0, None)
+    lam_max = float(eigvals.max()) if eigvals.size else 0.0
+    if rcond is None:
+        rcond = n * float(np.finfo(jacobian_t.dtype).eps)
+    # rcond cuts singular values of J, which are sqrt(eigenvalues of J^T J);
+    keep = eigvals > rcond**2 * lam_max
+    inv = np.where(keep, 1.0 / np.where(keep, eigvals, 1.0), 0.0)
 
-    JtJ = jax.lax.map(jax.jit(jtj_col), jnp.eye(n), batch_size=batch_size)
-    JtJ64 = JtJ.astype(jnp.float64)
-
-    _, s, vh = jnp.linalg.svd(JtJ64, hermitian=True)
-    smax = s[0]
-    tol = (rcond if rcond is not None else n * jnp.finfo(jnp.float64).eps) * smax
-    mask = s > tol
-    s_inv = jnp.where(mask, 1.0 / s, 0.0)
-    cov = (vh.T * s_inv) @ vh
-
-    n_null = int(jnp.sum(~mask))
+    n_null = int((~keep).sum())
     if n_null > 0:
-        smin = float(s[-1])
-        cond = float(smax / smin) if smin > 0 else float("inf")
+        lam_min = float(eigvals[keep].min()) if keep.any() else 0.0
+        cond = (lam_max / lam_min) ** 0.5 if lam_min > 0 else float("inf")
+        culprits = _null_space_parameters(diff, eigvecs[:, ~keep])
         warnings.warn(
-            f"parameter_errors: J^T J is rank-deficient "
-            f"({n_null} singular value(s) <= rcond * s_max; "
-            f"condition number {cond:.3e}).  Returned σ are from the "
-            f"Moore–Penrose pseudoinverse and describe the identifiable "
-            f"projection of each parameter; unidentifiable directions "
-            f"get zero error by construction.  A common cause is the "
-            f"degeneracy between a global `efficiency` and the overall "
-            f"scale of `pixel_efficiency` (flatfield normalisation).  "
-            f"Freeze one of the degenerate parameters via "
-            f"`nyx.core.parameter.freeze` to obtain a unique MLE.",
+            f"parameter_errors: J is rank-deficient "
+            f"({n_null} of {n} singular value(s) <= rcond * sigma_max, "
+            f"rcond = {rcond:.3e}; condition number of the retained block "
+            f"{cond:.3e}).  The "
+            f"unconstrained direction(s) lie mostly along {culprits}, whose "
+            f"returned σ are therefore NOT error bars: they describe the "
+            f"identifiable projection only, and are as small as the "
+            f"pseudoinverse can make them rather than as large as the true "
+            f"(unbounded) uncertainty.  A common cause is the degeneracy "
+            f"between a global `efficiency` and the overall scale of "
+            f"`pixel_efficiency` (flatfield normalisation).  Freeze one of "
+            f"them via `nyx.core.parameter.freeze` to obtain a unique MLE "
+            f"and meaningful σ for the rest.",
             stacklevel=2,
         )
 
+    # Only the diagonal of the covariance is needed, so contract the
+    # eigenvectors directly instead of forming the full n x n inverse.
+    variance = (eigvecs**2) @ inv
     if reduced_chi2:
-        m = r0.size
-        cov = cov * (jnp.sum(r0**2) / (m - n))
+        variance = variance * (float(jnp.sum(r0**2)) / (r0.size - n))
 
-    sigma_flat = jnp.sqrt(jnp.diag(cov)).astype(flat.dtype)
-    return unravel(sigma_flat)
+    sigma = unravel(jnp.asarray(np.sqrt(variance), dtype=flat.dtype))
+
+    # `unravel` rebuilds Parameters whose factors are sigmas in the space
+    # the optimizer steps in, not physical units.
+    def to_physical(fitted_p: Any, sigma_p: Any) -> Any:
+        if not (_is_param(fitted_p) and _is_param(sigma_p)):
+            return sigma_p
+        return Parameter.from_value(
+            jnp.abs(fitted_p.dvalue_dfactor) * sigma_p.factor,
+            scale=fitted_p.scale,
+            per_obs=fitted_p.per_obs,
+            frozen=fitted_p.frozen,
+            transform=fitted_p.transform,
+        )
+
+    return jax.tree.map(to_physical, diff, sigma, is_leaf=_is_param)
 
 
 def rescale_from_errors[T](fitted: T, errs: T) -> T:
     """
     Rescale every trainable Parameter using error estimates as new scales.
-    This normalises parameter magnitudes across physically disparate 
+    This normalises parameter magnitudes across physically disparate
     quantities and can improve convergence in a subsequent fit.
-    
+
     Parameters
     ----------
     fitted : pytree
@@ -373,8 +480,11 @@ def rescale_from_errors[T](fitted: T, errs: T) -> T:
         Copy of *fitted* with every trainable Parameter rescaled.
     """
     diff, static = eqx.partition(fitted, _is_trainable, is_leaf=_is_param)
+
     def rescale_leaf(param: Any, err: Any) -> Any:
         if not (_is_param(param) and _is_param(err)):
+            return param
+        if param.transform is not None:
             return param
         new_scale = float(jnp.max(jnp.abs(err.value)))
         if new_scale == 0.0 or not np.isfinite(new_scale):
@@ -385,10 +495,11 @@ def rescale_from_errors[T](fitted: T, errs: T) -> T:
             per_obs=param.per_obs,
             frozen=param.frozen,
         )
+
     rescaled = jax.tree.map(rescale_leaf, diff, errs, is_leaf=_is_param)
     return eqx.combine(rescaled, static, is_leaf=_is_param)
 
-    
+
 # Multi-target fitting
 
 

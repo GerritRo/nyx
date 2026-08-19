@@ -3,6 +3,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from nyx import ASSETS_PATH
+from nyx.atmosphere.components import thin_shell_airmass
 from nyx.core.parameter import Parameter
 from nyx.core.protocols import SourceObsData
 from nyx.core.spectral import ParametricSpectrum, SpectralModel, resample_flux
@@ -37,6 +38,12 @@ def _airglow_model_fn(base_spectra):
 def _van_rhijn(altitude, height_km):
     """Van Rhijn function for airglow zenith dependence.
 
+    The path length through a thin emitting shell, relative to the
+    vertical one.  That is the same geometry as the airmass of a thin
+    absorbing shell, so this delegates to
+    :func:`~nyx.atmosphere.components.thin_shell_airmass` rather than
+    keeping a second copy of the expression.
+
     Parameters
     ----------
     altitude : array
@@ -49,9 +56,7 @@ def _van_rhijn(altitude, height_km):
     array
         Van Rhijn weight at each position.
     """
-    R_earth = 6378.0  # km
-    zenith = np.pi / 2 - altitude
-    return 1.0 / np.sqrt(1 - (R_earth / (R_earth + height_km)) ** 2 * np.sin(zenith) ** 2)
+    return thin_shell_airmass(np.pi / 2 - np.asarray(altitude), height_km)
 
 
 class Airglow(BaseEmitter):

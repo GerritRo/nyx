@@ -184,12 +184,7 @@ class Stars(BaseEmitter):
 
         source_conditions = jnp.asarray(np.vstack([resolved_cond, quasi_cond]))
 
-        # Per-source light curves (occultations, variable stars).  Resolved
-        # stars occupy indices [0, n_resolved) in both source_conditions and
-        # the per-obs source_coords stack, so the registered index maps
-        # directly onto a source column.  A curve may be achromatic ((nobs,))
-        # or wavelength-dependent ((nobs, n_wvl)); ``set_source_weight`` handles
-        # the array shape (2-D or 3-D) and promotion, shared with Scene editing.
+        # Per-source light curves (occultations, variable stars).
         n_resolved = len(resolved_cond)
         n_src, n_wvl = source_conditions.shape[0], len(self._wvls)
         source_weights = None
@@ -203,8 +198,6 @@ class Stars(BaseEmitter):
             )
 
         # Rotate diffuse map to AltAz and transform coords per observation.
-        # Complete sky_map is used for scattering (no FOV masking)
-        # resolved + quasi-point sources go through direct extinction.
         m_low = hp.ud_grade(
             self._sky_map, nside_out=self._nside, power=-2, order_in="NEST", order_out="RING"
         )
@@ -264,66 +257,64 @@ class Stars(BaseEmitter):
             )
         )
 
-        bright_mask = catalog["phot_g_mean_mag"] < lim_mag
+        g, bp, rp = _gaia_photometry(catalog)
+
+        bright_mask = g < lim_mag
         bright_ra = catalog["ra"][bright_mask]
         bright_dec = catalog["dec"][bright_mask]
-        bright_conditions = np.column_stack(
-            [
-                catalog["phot_g_mean_mag"][bright_mask],
-                np.nan_to_num(catalog["phot_bp_mean_mag"][bright_mask].astype(float), nan=21.0),
-                np.nan_to_num(catalog["phot_rp_mean_mag"][bright_mask].astype(float), nan=21.0),
-            ]
-        )
+        bright_conditions = np.column_stack([g[bright_mask], bp[bright_mask], rp[bright_mask]])
 
         npix = len(faint_map[0])
         faint_flux = 10 ** (-0.4 * faint_map) + 1e-10
-        catalog_map = _build_gaia_catalog_map(catalog, npix)
+        catalog_map = _build_gaia_catalog_map(g, bp, rp, catalog["ra"], catalog["dec"], npix)
         sky_map = faint_flux + catalog_map
 
-        spectral_model = _build_gaia_spectral_model(catalog, geo)
+        spectral_model = _build_gaia_spectral_model(bp, rp, geo)
 
         return cls(geo, spectral_model, bright_ra, bright_dec, bright_conditions, sky_map)
 
 
 # Gaia DR3
+_NO_PHOTOMETRY_MAG = 99.0
 
 
-def _build_gaia_catalog_map(catalog, npix):
+def _gaia_photometry(catalog):
+    """
+    ``(G, BP, RP)`` magnitudes with missing BP/RP filled by colour.
+
+    Returns
+    -------
+    g, bp, rp : np.ndarray
+        Magnitudes, one entry per catalog row, all finite.
+    """
+    g = np.asarray(catalog["phot_g_mean_mag"], dtype=float)
+    bp = np.asarray(catalog["phot_bp_mean_mag"], dtype=float)
+    rp = np.asarray(catalog["phot_rp_mean_mag"], dtype=float)
+
+    measured = np.isfinite(bp) & np.isfinite(rp)
+    if not measured.any():
+        raise ValueError("catalog contains no source with both BP and RP measured")
+    median_color = float(np.median((rp - bp)[measured]))
+
+    g = np.where(np.isfinite(g), g, _NO_PHOTOMETRY_MAG)
+    bp = np.where(measured, bp, g - median_color / 2)
+    rp = np.where(measured, rp, g + median_color / 2)
+    return g, bp, rp
+
+
+def _build_gaia_catalog_map(g, bp, rp, ra, dec, npix):
     """Bin all catalog stars into a HEALPix linear-flux map.
 
     Returns ``(3, npix)`` in ``[G, BP, RP]`` order, nested ordering.
     """
     map_nside = hp.npix2nside(npix)
-
-    hp_inds = hp.ang2pix(
-        map_nside,
-        catalog["ra"],
-        catalog["dec"],
-        nest=True,
-        lonlat=True,
-    )
-
-    g_mag = catalog["phot_g_mean_mag"]
-    bp_mag = np.nan_to_num(catalog["phot_bp_mean_mag"], nan=21)
-    rp_mag = np.nan_to_num(catalog["phot_rp_mean_mag"], nan=21)
-
-    return np.vstack(
-        [
-            np.bincount(hp_inds, 10 ** (-0.4 * g_mag), npix),
-            np.bincount(hp_inds, 10 ** (-0.4 * bp_mag), npix),
-            np.bincount(hp_inds, 10 ** (-0.4 * rp_mag), npix),
-        ]
-    )
+    hp_inds = hp.ang2pix(map_nside, ra, dec, nest=True, lonlat=True)
+    return np.vstack([np.bincount(hp_inds, 10 ** (-0.4 * mag), npix) for mag in (g, bp, rp)])
 
 
-def _build_gaia_spectral_model(catalog, geo):
+def _build_gaia_spectral_model(bp, rp, geo):
     """Build a Pickles (1998) spectral model for Gaia photometry.
-
-    Uses the full catalog color range so the model is independent
-    of lim_mag.
     """
-    bp = np.nan_to_num(catalog["phot_bp_mean_mag"], nan=21)
-    rp = np.nan_to_num(catalog["phot_rp_mean_mag"], nan=21)
     rp_bp = rp - bp
 
     G = Bandpass.from_SVO("GAIA/GAIA3.G")
@@ -333,7 +324,7 @@ def _build_gaia_spectral_model(catalog, geo):
     spec_grid = create_color_grid(
         G,
         (RP, BP),
-        [np.nanmin(rp_bp), 0.5],
+        [float(np.min(rp_bp)), 0.5],
         PicklesTRDSAtlas1998(),
         photon_flux=True,
     )

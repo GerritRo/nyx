@@ -19,9 +19,8 @@ class SingleScattering(AtmosphereModel):
     """Single-scattering atmosphere.
 
     Composes named :class:`ScatteringComponent` modules, each providing
-    its own optical depth, phase function, and trainable parameters.
-    The scattering kernel generically blends all components weighted by
-    their optical depths.
+    its own optical depth, phase function, single-scattering albedo,
+    airmass and trainable parameters.
     """
 
     _trainable = ()  # trainable params live on individual components
@@ -83,6 +82,32 @@ class SingleScattering(AtmosphereModel):
             tau_total = tau_total + t
         return tau_total, taus
 
+    def _optical_path(self, altitudes, height_km):
+        """Slant optical depth ``sum_i tau_i * X_i`` along each line of sight.
+
+        Each component supplies its own airmass, so a species confined to
+        a layer far above the troposphere is not forced onto the
+        tropospheric one; see :class:`~nyx.atmosphere.components.
+        TabulatedAbsorption`.
+
+        Parameters
+        ----------
+        altitudes : jax.Array, shape S
+            Line-of-sight altitudes in radians.
+        height_km : jax.Array
+            Observer height above sea level in km.
+
+        Returns
+        -------
+        jax.Array, shape ``S + (n_wvl,)``
+        """
+        zenith = jnp.pi / 2 - jnp.asarray(altitudes)
+        path = jnp.zeros(zenith.shape + (len(self._wvls),))
+        for c in self.components.values():
+            airmass = jnp.asarray(c.airmass(zenith, self._airmass_func))
+            path = path + c.tau(height_km) * airmass[..., None]
+        return path
+
     def extinct(self, altitudes, spectra, height_km):
         """Apply extinction to spectra at given sky positions.
 
@@ -100,10 +125,8 @@ class SingleScattering(AtmosphereModel):
         jax.Array, shape (n_sources, n_wvl)
             Extincted spectra.
         """
-        tau_total, _ = self._tau_components(height_km)
-        sec_z = self._airmass(altitudes)
-        extinction = jnp.exp(-tau_total[None, :] * sec_z)
-        return spectra * extinction
+        path = self._optical_path(jnp.asarray(altitudes)[..., 0], height_km)
+        return spectra * jnp.exp(-path)
 
     def _scattering_kernel_from_tau(self, cos_scat_angle, sec_z_fov, sec_z_source, tau_total, taus):
         """Compute scattering kernel from pre-computed optical depths.
@@ -123,8 +146,9 @@ class SingleScattering(AtmosphereModel):
         indicatrix = jnp.zeros(cos_scat_angle.shape + (len(self._wvls),))
         for comp, tau_i in zip(self.components.values(), taus, strict=True):
             p_i = comp.phase(cos_scat_angle)
-            indicatrix = indicatrix + tau_i * p_i[..., None]
-        indicatrix = indicatrix / jnp.maximum(tau_total, 1e-10)
+            indicatrix = indicatrix + comp.ssa * tau_i * p_i[..., None]
+        denom = jnp.where(jnp.abs(tau_total) > 1e-10, tau_total, 1e-10)
+        indicatrix = indicatrix / denom
 
         grad = gradation_function(
             tau_total[None, None, None, :],
@@ -188,7 +212,7 @@ class SingleScattering(AtmosphereModel):
         )
         scattering_map = kernel * self._pixel_area
 
-        extinction_hp = jnp.exp(-tau_total[None, :] * sec_z_hp[:, None])
+        extinction_hp = jnp.exp(-self._optical_path(alt_hp, sky.height_km))
 
         return AtmosphereResult(
             extinction_hp=extinction_hp,
@@ -244,7 +268,13 @@ class SingleScattering(AtmosphereModel):
 
 
 def HGNoAbsorption(
-    geo, aod_500=0.1, angstrom_exp=1.5, hg_asymmetry=0.75, airmass_formula="kasten_young_1989"
+    geo,
+    aod_500=0.1,
+    angstrom_exp=1.5,
+    hg_asymmetry=0.75,
+    hg_ssa=0.9,
+    airmass_formula="kasten_young_1989",
+    pressure_hpa=None,
 ):
     """Standard single-scattering atmosphere (Rayleigh + Mie).
 
@@ -261,8 +291,13 @@ def HGNoAbsorption(
         Angstrom exponent (default 1.5).
     hg_asymmetry : float
         Henyey-Greenstein asymmetry parameter (default 0.75).
+    hg_ssa : float
+        Aerosol single-scattering albedo (default 0.9).
     airmass_formula : str
         Key into ``AIRMASS_FUNCTIONS`` (default ``'kasten_young_1989'``).
+    pressure_hpa : float or None
+        Station pressure for the Rayleigh column. Defaults to the
+        barometric estimate from the observer height.
 
     Returns
     -------
@@ -270,19 +305,27 @@ def HGNoAbsorption(
     """
     w = geo.wvls
     components = {
-        "Rayleigh": RayleighComponent(w),
+        "Rayleigh": RayleighComponent(w, pressure_hpa=pressure_hpa),
         "Mie": HenyeyGreensteinComponent(
             w,
             aod_500=aod_500,
             angstrom_exp=angstrom_exp,
             hg_asymmetry=hg_asymmetry,
+            hg_ssa=hg_ssa,
         ),
     }
     return SingleScattering(geo, components, airmass_formula=airmass_formula)
 
 
 def HGOzoneAbsorption(
-    geo, aod_500=0.1, angstrom_exp=1.5, hg_asymmetry=0.75, airmass_formula="kasten_young_1989"
+    geo,
+    aod_500=0.1,
+    angstrom_exp=1.5,
+    hg_asymmetry=0.75,
+    hg_ssa=0.9,
+    airmass_formula="kasten_young_1989",
+    pressure_hpa=None,
+    ozone_height_km=25.0,
 ):
     """Standard single-scattering atmosphere (Rayleigh + Mie).
 
@@ -299,8 +342,16 @@ def HGOzoneAbsorption(
         Angstrom exponent (default 1.5).
     hg_asymmetry : float
         Henyey-Greenstein asymmetry parameter (default 0.75).
+    hg_ssa : float
+        Aerosol single-scattering albedo (default 0.9).
     airmass_formula : str
         Key into ``AIRMASS_FUNCTIONS`` (default ``'kasten_young_1989'``).
+    pressure_hpa : float or None
+        Station pressure for the Rayleigh column.  Defaults to the
+        barometric estimate from the observer height.
+    ozone_height_km : float or None
+        Height of the ozone layer, used for its own airmass (default
+        25.0).  ``None`` puts it back on the shared airmass formula.
 
     Returns
     -------
@@ -308,14 +359,15 @@ def HGOzoneAbsorption(
     """
     w = geo.wvls
     components = {
-        "Rayleigh": RayleighComponent(w),
+        "Rayleigh": RayleighComponent(w, pressure_hpa=pressure_hpa),
         "Mie": HenyeyGreensteinComponent(
             w,
             aod_500=aod_500,
             angstrom_exp=angstrom_exp,
             hg_asymmetry=hg_asymmetry,
+            hg_ssa=hg_ssa,
         ),
-        "O3": tau_ozone(w),
+        "O3": tau_ozone(w, layer_height_km=ozone_height_km),
     }
 
     return SingleScattering(geo, components, airmass_formula=airmass_formula)

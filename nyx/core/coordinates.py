@@ -134,6 +134,15 @@ def rotation_matrix_from_altaz(az_rad: float, alt_rad: float) -> np.ndarray:
     )
 
 
+def safe_arcsin(z: jax.Array) -> jax.Array:
+    """
+    ``arcsin`` of a direction cosine, differentiable at ``|z| >= 1``.
+    """
+    at_pole = jnp.abs(z) >= 1.0
+    safe_z = jnp.where(at_pole, 0.0, z)
+    return jnp.where(at_pole, jnp.sign(z) * (jnp.pi / 2), jnp.arcsin(safe_z))
+
+
 def altaz_to_offset(az: ArrayLike, alt: ArrayLike, R: ArrayLike) -> tuple[jax.Array, jax.Array]:
     """Transform AltAz (az, alt) to offset frame (lon, lat) using R.
 
@@ -160,7 +169,7 @@ def altaz_to_offset(az: ArrayLike, alt: ArrayLike, R: ArrayLike) -> tuple[jax.Ar
     R = jnp.asarray(R)
     p_local = jnp.einsum("ij,...j->...i", R, p)
     lon = jnp.arctan2(p_local[..., 1], p_local[..., 0])
-    lat = jnp.arcsin(jnp.clip(p_local[..., 2], -1, 1))
+    lat = safe_arcsin(p_local[..., 2])
     return lon, lat
 
 

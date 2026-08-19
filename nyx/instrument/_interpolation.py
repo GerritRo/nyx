@@ -6,12 +6,6 @@ import jax.numpy as jnp
 import numpy as np
 from scipy.integrate import simpson
 
-#: Tolerance for :meth:`PixelLattice.from_grid`, as a fraction of one
-#: response-grid step.  Grids that share a lattice by construction miss the
-#: fitted one only by the float32 round-off of their stored coordinates
-#: (~1e-5 of a step for a Cherenkov camera), while grids that genuinely do
-#: not share one miss it by O(0.1) of a step, so anything in this range
-#: separates the two cases.
 LATTICE_TOL = 1e-3
 
 
@@ -46,30 +40,20 @@ def _bilinear_coeffs(y_coords, x_coords, height, width):
 
 
 class PixelLattice(eqx.Module):
-    """The sampling lattice every pixel's response grid is a window onto.
-
-    Response tables produced by one ray-tracing run share a single step and
-    differ only by an integer offset, so all of them are windows onto one
-    lattice covering the focal plane.  That is what makes the catalogue
-    projection separable: rasterise the point sources onto the lattice once
-    (:func:`project_lattice`), then read each pixel's window out of it.
-
-    Holding the geometry this way makes the shared lattice exact rather than
-    something rediscovered per instrument: pixel positions are integers, and
-    the whole focal-plane geometry is four numbers plus one integer pair per
-    pixel.  :meth:`from_grid` recovers it from explicit per-pixel sample
-    coordinates, as a ray tracer emits them.
+    """
+    The sampling lattice every pixel's response grid is a window onto.
 
     Parameters
     ----------
     origin : array-like, shape (2,)
-        Position of lattice node ``(0, 0)``, in radians.
+        Position of lattice node ``(0, 0)`` as ``[lon, lat]``, in radians.
     step : array-like, shape (2,)
-        Node spacing along each axis, in radians.
+        Node spacing along ``[lon, lat]``, in radians.
     offset : array-like, shape (n_pixels, 2)
-        Node index of each pixel's response window corner.
+        Node index of each pixel's response window corner, ``[lon, lat]``.
     grid_shape : tuple of int
-        Response table shape ``(height, width)`` of a single pixel.
+        Response table shape ``(height, width)`` of a single pixel, with
+        ``height`` running along longitude and ``width`` along latitude.
     """
 
     origin: jax.Array
@@ -89,8 +73,6 @@ class PixelLattice(eqx.Module):
             raise ValueError(f"offset must have shape (n_pixels, 2), got {corner.shape}")
         if np.any(corner < 0):
             raise ValueError(f"offsets must be non-negative, got {corner.min()}")
-        # The raster must span every window, so the lattice extends one full
-        # response grid beyond the furthest corner.
         self.shape = (
             int(corner[:, 0].max()) + self.grid_shape[0],
             int(corner[:, 1].max()) + self.grid_shape[1],
@@ -235,15 +217,6 @@ def _fit_lattice_axis(coords_1d, n_iter: int = 8):
 def project_lattice(lattice: PixelLattice, values, coords, rates):
     """Project point sources onto pixels via the shared response lattice.
 
-    Sources are rasterised onto the lattice with bilinear weights, then each
-    pixel integrates its own window of the rasterised map against its
-    response.  This is bilinear interpolation of each pixel's response at
-    each source position -- splatting and interpolation are adjoint, so the
-    two agree exactly -- but it costs
-    ``O(n_sources + n_pixels * grid_dim**2)`` instead of
-    ``O(n_pixels * n_sources)``, and never forms an ``n_pixels x n_sources``
-    intermediate, on the backward pass either.
-
     Parameters
     ----------
     lattice : PixelLattice
@@ -287,11 +260,6 @@ def project_lattice(lattice: PixelLattice, values, coords, rates):
 @cache
 def _simpson_weights(n: int) -> np.ndarray:
     """Quadrature weights reproducing ``scipy`` Simpson on a unit-spaced axis.
-
-    Simpson's rule is a linear functional of the samples, so on a uniform
-    axis it collapses to a fixed weight vector -- recovered here by
-    integrating the identity matrix, which keeps scipy's handling of an even
-    sample count rather than reimplementing it.
     """
     return simpson(np.eye(n), dx=1.0, axis=-1)
 
@@ -367,28 +335,39 @@ def interpolate_regular_grid(x, y, x0, x_step, nx, y0, y_step, ny, data):
     )
 
 
-def interpolate_pixel_rates(Xi, Yi, values, coords):
-    """Bilinear interpolation of gridded values at arbitrary coordinates.
+def interpolate_pixel_rates(lat_grid, lon_grid, values, coords):
+    """Bilinear interpolation of the FOV evaluation grid at pixel centres.
+    Parameters
+    ----------
+    lat_grid, lon_grid : jax.Array
+        Node coordinates of the evaluation grid along the row and column
+        axis respectively, in radians.
+    values : jax.Array, shape (n_lat, n_lon)
+        Gridded values to sample.
+    coords : jax.Array, shape (n_pixels, 2)
+        Pixel centres as ``[lon, lat]``, in radians.
 
-    Contracts against the whole grid with separable hat weights rather
-    than gathering four corners.  The FOV eval grid is tiny (``ngrid``
-    cells per axis), so the contraction is cheap, and it keeps the
-    backward pass a reduction: gathering instead makes the transpose a
-    scatter of ``n_pixels`` updates into ``ngrid ** 2`` addresses, whose
-    atomic contention costs more than the forward pass by an order of
-    magnitude.
+    Returns
+    -------
+    jax.Array, shape (n_pixels,)
+        Interpolated value per pixel; zero outside the grid.
     """
     height, width = values.shape
-    ystart, ystep = Yi[0], Yi[1] - Yi[0]
-    xstart, xstep = Xi[0], Xi[1] - Xi[0]
+    lat_start, lat_step = lat_grid[0], lat_grid[1] - lat_grid[0]
+    lon_start, lon_step = lon_grid[0], lon_grid[1] - lon_grid[0]
 
-    y_coords = (coords[:, 0] - ystart) / ystep
-    x_coords = (coords[:, 1] - xstart) / xstep
+    lat_coords = (coords[:, 1] - lat_start) / lat_step
+    lon_coords = (coords[:, 0] - lon_start) / lon_step
+
     valid_mask = (
-        (y_coords >= 0) & (y_coords < height - 1) & (x_coords >= 0) & (x_coords < width - 1)
+        (lat_coords >= 0)
+        & (lat_coords <= height - 1)
+        & (lon_coords >= 0)
+        & (lon_coords <= width - 1)
     )
 
-    wy = jnp.maximum(1.0 - jnp.abs(y_coords[:, None] - jnp.arange(height)), 0.0)
-    wx = jnp.maximum(1.0 - jnp.abs(x_coords[:, None] - jnp.arange(width)), 0.0)
-    interpolated = jnp.sum((wy @ values) * wx, axis=1)
+    # Hat weights: max(0, 1 - |c - i|)
+    w_lat = jnp.maximum(1.0 - jnp.abs(lat_coords[:, None] - jnp.arange(height)), 0.0)
+    w_lon = jnp.maximum(1.0 - jnp.abs(lon_coords[:, None] - jnp.arange(width)), 0.0)
+    interpolated = jnp.sum((w_lat @ values) * w_lon, axis=1)
     return jnp.where(valid_mask, interpolated, 0.0)

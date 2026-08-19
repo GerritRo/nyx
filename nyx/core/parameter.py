@@ -22,6 +22,27 @@ __all__ = [
 ]
 
 
+# Parameter transforms
+_TRANSFORMS: dict[str | None, tuple[Callable, Callable, Callable]] = {
+    None: (lambda u: u, lambda v: v, lambda u: jnp.ones_like(u)),
+    "log": (jnp.exp, jnp.log, jnp.exp),
+    "softplus": (
+        lambda u: jnp.logaddexp(u, 0.0),
+        lambda v: v + jnp.log(-jnp.expm1(-v)),
+        jax.nn.sigmoid,
+    ),
+    "tanh": (jnp.tanh, jnp.arctanh, lambda u: 1.0 - jnp.tanh(u) ** 2),
+}
+
+# Physical domain of each transform.
+_TRANSFORM_DOMAINS: dict[str | None, str] = {
+    None: "(-inf, inf)",
+    "log": "(0, inf)",
+    "softplus": "(0, inf)",
+    "tanh": "(-1, 1)",
+}
+
+
 def _scale10(value: ArrayLike) -> float:
     """Return ``10 ** floor(log10(max |value|))``, or 1.0 for zero input.
 
@@ -37,39 +58,48 @@ def _scale10(value: ArrayLike) -> float:
 class Parameter(eqx.Module):
     """A trainable physical parameter with an explicit characteristic scale.
 
-    ``value = factor * scale``.  The optimizer differentiates through
-    ``factor`` only, so a well-chosen ``scale`` makes a single global
-    learning rate work across parameters of very different physical
-    magnitudes (e.g. ~1e-4 rad shifts vs ~1e0 aerosol optical depth).
-
     Attributes
     ----------
     factor : jax.Array
         The JAX leaf.  O(1) by construction when ``scale`` is chosen
-        correctly.  This is the only pytree leaf; ``scale``, ``per_obs``
-        and ``frozen`` are static metadata.
+        correctly.  This is the only pytree leaf; ``scale``, ``per_obs``,
+        ``frozen`` and ``transform`` are static metadata.
     scale : float
-        Characteristic physical scale.  Set once (typically at
-        construction) and static for JIT; change it via
-        :func:`autoscale` or by building a new Parameter.
+        Characteristic scale, in the *unconstrained* space the optimizer
+        steps in.  Set once (typically at construction) and static for
+        JIT; change it via :func:`autoscale` or by building a new
+        Parameter.  Transformed parameters default to ``1.0``.
     per_obs : bool
         If True, this parameter carries a leading ``(nobs, ...)`` axis
         after :func:`tile_per_obs`; typical for instrument pointing
-        (``shift``, ``rotation``) that varies observation-to-observation.
+        (``shift``, ``rotation``).
     frozen : bool
         If True, the parameter is excluded from optimization even when
         selected by default.
+    transform : str or None
+        ``None`` (unconstrained), ``'log'`` or ``'softplus'`` for a
+        positive quantity, or ``'tanh'`` for one confined to ``(-1, 1)``.
     """
 
     factor: jax.Array
     scale: float = eqx.field(static=True, default=1.0)
     per_obs: bool = eqx.field(static=True, default=False)
     frozen: bool = eqx.field(static=True, default=False)
+    transform: str | None = eqx.field(static=True, default=None)
 
     @property
     def value(self) -> jax.Array:
-        """Physical value ``factor * scale``."""
-        return self.factor * self.scale
+        """Physical value ``transform(factor * scale)``."""
+        return _TRANSFORMS[self.transform][0](self.factor * self.scale)
+
+    @property
+    def dvalue_dfactor(self) -> jax.Array:
+        """``d value / d factor``, elementwise.
+
+        The delta-method factor that turns an uncertainty on ``factor``
+        into one on :attr:`value`; ``scale`` when untransformed.
+        """
+        return self.scale * _TRANSFORMS[self.transform][2](self.factor * self.scale)
 
     def freeze(self) -> Parameter:
         """Return a copy with ``frozen=True``."""
@@ -86,26 +116,50 @@ class Parameter(eqx.Module):
         scale: float | None = None,
         per_obs: bool = False,
         frozen: bool = False,
+        transform: str | None = None,
     ) -> Parameter:
         """Construct from a physical value.
 
         Parameters
         ----------
         value : array-like
-            Physical value (in the original physical units).
+            Physical value (in the original physical units).  Must lie in
+            the domain of *transform*.
         scale : float or None
             Characteristic scale.  When ``None``, chosen as
-            ``10**floor(log10(max|value|))``; 1.0 for zero.
+            ``10**floor(log10(max|value|))`` of the unconstrained value;
+            1.0 for zero or for any transformed parameter.
         per_obs, frozen : bool
             Metadata flags; see class docstring.
+        transform : str or None
+            Domain constraint; see class docstring.
         """
+        if transform not in _TRANSFORMS:
+            raise ValueError(
+                f"Unknown transform {transform!r}; "
+                f"choices are None, {', '.join(repr(k) for k in _TRANSFORMS if k)}."
+            )
         v = jnp.asarray(value)
         if not jnp.issubdtype(v.dtype, jnp.floating):
             v = v.astype(jnp.float32)
+        unconstrained = _TRANSFORMS[transform][1](v)
+        if not isinstance(unconstrained, jax.core.Tracer) and bool(
+            jnp.any(jnp.isnan(unconstrained))
+        ):
+            raise ValueError(
+                f"value {np.asarray(value)} lies outside {_TRANSFORM_DOMAINS[transform]}, "
+                f"the domain of the {transform!r} transform."
+            )
         if scale is None:
-            scale = _scale10(v)
+            scale = 1.0 if transform is not None else _scale10(unconstrained)
         scale = float(scale)
-        return cls(factor=v / scale, scale=scale, per_obs=per_obs, frozen=frozen)
+        return cls(
+            factor=unconstrained / scale,
+            scale=scale,
+            per_obs=per_obs,
+            frozen=frozen,
+            transform=transform,
+        )
 
 
 # Tree-level utilities
@@ -119,8 +173,9 @@ def autoscale[T](tree: T) -> T:
     """Rescale every :class:`Parameter` in *tree* using ``scale10``.
 
     ``value`` is preserved; ``factor`` is brought into the [0.1, 10) band
-    (up to sign) for non-zero parameters.  Flags (``per_obs``, ``frozen``)
-    are preserved.
+    (up to sign) for non-zero parameters.  Metadata (``per_obs``,
+    ``frozen``, ``transform``) is preserved.  Transformed parameters keep
+    ``scale = 1.0``: their factors are O(1) by construction.
     """
 
     def at_leaf(x: Any) -> Any:
@@ -129,6 +184,7 @@ def autoscale[T](tree: T) -> T:
                 x.value,
                 per_obs=x.per_obs,
                 frozen=x.frozen,
+                transform=x.transform,
             )
         return x
 
@@ -198,8 +254,8 @@ def unfreeze[T](tree: T, *selectors: Callable[[Any], Any]) -> T:
 def _wrap_like(target: Any, value: Any) -> Any:
     """If *target* is a :class:`Parameter` and *value* is not, wrap
     *value* into a new Parameter that preserves *target*'s ``scale``,
-    ``per_obs`` and ``frozen`` metadata.  Otherwise return *value*
-    unchanged.
+    ``per_obs``, ``frozen`` and ``transform`` metadata.  Otherwise return
+    *value* unchanged.
     """
     if _is_param(target) and not _is_param(value):
         return Parameter.from_value(
@@ -207,6 +263,7 @@ def _wrap_like(target: Any, value: Any) -> Any:
             scale=target.scale,
             per_obs=target.per_obs,
             frozen=target.frozen,
+            transform=target.transform,
         )
     return value
 
@@ -263,7 +320,7 @@ class _ParametersTable:
     and as an HTML table in Jupyter via ``_repr_html_``.
     """
 
-    _COLS = ("name", "value", "scale", "shape", "per_obs", "frozen")
+    _COLS = ("name", "value", "scale", "shape", "per_obs", "frozen", "transform")
 
     def __init__(self, rows: Iterable[dict[str, str]]) -> None:
         # rows: list of dicts with the keys in ``_COLS``.
@@ -313,6 +370,7 @@ def parameters_table(tree: Any) -> _ParametersTable:
                 "shape": str(tuple(np.asarray(p.factor).shape)),
                 "per_obs": "yes" if p.per_obs else "-",
                 "frozen": "yes" if p.frozen else "-",
+                "transform": p.transform or "-",
             }
         )
     rows.sort(key=lambda r: r["name"])
