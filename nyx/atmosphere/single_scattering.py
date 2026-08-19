@@ -158,6 +158,24 @@ class SingleScattering(AtmosphereModel):
 
         return indicatrix * grad
 
+    @staticmethod
+    def _cos_scattering_angle(sky):
+        """Cosine of the angle from every FOV grid cell to every sky pixel.
+
+        Parameters
+        ----------
+        sky : SkyGeometry
+        Returns
+        -------
+        jax.Array, shape (ngrid, ngrid, nsky)
+        """
+        return cos_angular_separation_jax(
+            sky.fov_altaz_grid[..., 0][..., None],
+            sky.fov_altaz_grid[..., 1][..., None],
+            sky.altaz_coord[..., 0],
+            sky.altaz_coord[..., 1],
+        )
+
     def _scattering_kernel(self, cos_scat_angle, sec_z_fov, sec_z_source, height_km):
         """Compute scattering kernel: indicatrix * gradation.
 
@@ -204,7 +222,7 @@ class SingleScattering(AtmosphereModel):
         tau_total, taus = self._tau_components(sky.height_km)
 
         kernel = self._scattering_kernel_from_tau(
-            jnp.cos(sky.scattering_angle),
+            self._cos_scattering_angle(sky),
             self._airmass(sky.fov_altaz_grid[..., 1]),
             sec_z_hp,
             tau_total,

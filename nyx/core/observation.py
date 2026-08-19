@@ -8,7 +8,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from astropy.coordinates import AltAz, EarthLocation, SkyCoord
-from astropy.coordinates.angles import angular_separation
 from astropy.time import Time
 
 from nyx.core.coordinates import (
@@ -28,7 +27,6 @@ class SkyGeometry(eqx.Module):
     icrs_coord: jnp.ndarray  # (nsky, 2)
     sref_coord: jnp.ndarray  # (nsky, 2)
     fov_altaz_grid: jnp.ndarray  # (ngrid, ngrid, 2)
-    scattering_angle: jnp.ndarray  # (ngrid, ngrid, nsky)
     height_km: jnp.ndarray  # scalar - observer height above sea level [km]
     hemisphere_mask: jnp.ndarray  # (npix,) bool - upper hemisphere pixels
 
@@ -124,18 +122,7 @@ class Observation:
             pointing_frames,
         )
 
-        # Precompute sky grids and scattering angles
-        self.hp_coords_altaz = SkyCoord(
-            geom.lon,
-            geom.lat,
-            unit="rad",
-            frame=self.altaz_frames[0],
-        )
         self.fov_coords = self._build_fov_coords(geom, self.pointing_matrices, self.altaz_frames)
-        self.scattering_angle = self._compute_scattering_angles(
-            self.fov_coords,
-            self.hp_coords_altaz,
-        )
 
         # Frame registry and coordinate cache
         self._frames = dict(_BUILTIN_FRAMES)
@@ -161,24 +148,6 @@ class Observation:
             az, alt = offset_to_altaz(geom.X, geom.Y, R)
             fov_coords.append(SkyCoord(az=az, alt=alt, unit="rad", frame=af))
         return fov_coords
-
-    @staticmethod
-    def _compute_scattering_angles(
-        fov_coords: list[SkyCoord], hp_coords_altaz: SkyCoord
-    ) -> np.ndarray:
-        """Compute scattering angles between FOV grid and hemisphere pixels."""
-        return np.stack(
-            [
-                angular_separation(
-                    fc.az.rad[:, :, np.newaxis],
-                    fc.alt.rad[:, :, np.newaxis],
-                    hp_coords_altaz.az.rad[np.newaxis, np.newaxis, :],
-                    hp_coords_altaz.alt.rad[np.newaxis, np.newaxis, :],
-                )
-                for fc in fov_coords
-            ],
-            axis=0,
-        )
 
     @property
     def height_km(self) -> float:
@@ -265,7 +234,6 @@ class Observation:
                     [jnp.array(self.fov_coords[i].az.rad), jnp.array(self.fov_coords[i].alt.rad)],
                     axis=-1,
                 ),
-                scattering_angle=jnp.array(self.scattering_angle[i]),
                 height_km=jnp.array(self.height_km),
                 hemisphere_mask=jnp.array(self.geom.mask),
             )
