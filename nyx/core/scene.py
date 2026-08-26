@@ -8,7 +8,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from nyx.core.filters import _navigate, per_obs_filter
+from nyx.core.filters import _navigate, per_obs_filter, select_obs
 from nyx.core.observation import Observation, RenderGeometry
 from nyx.core.parameter import _ParametersTable, _wrap_like, parameters_table
 from nyx.core.protocols import (
@@ -213,8 +213,7 @@ class Scene(eqx.Module):
         )
 
     def _render_frame(self, inst_name: str) -> _RenderFrame:
-        """Combine the shared sky with one instrument's observation data.).
-        """
+        """Combine the shared sky with one instrument's observation data.)."""
         bundle = self._obs_bundles[inst_name]
         od = bundle.obs_data
         return _RenderFrame(
@@ -308,6 +307,11 @@ class Scene(eqx.Module):
 
             scene.sky_view().plot()
 
+        This is :func:`nyx.view.render_sky` given a one-channel response
+        built from the instrument's own passband -- the same computation
+        that produces a colour photograph, only narrower.  See
+        :mod:`nyx.view`.
+
         Parameters
         ----------
         instrument : str, optional
@@ -316,18 +320,38 @@ class Scene(eqx.Module):
         obs : int
             Observation index (default: the first).
         **kwargs
-            Forwarded to :func:`nyx.core.skyview.sky_view` (``indirect``,
-            ``point_sources``, ``nside``, ``chunk``).
+            Forwarded to :func:`nyx.view.allsky.render_prepared`
+            (``indirect``, ``scatter_nside``, ``target_nside``,
+            ``point_nside``, ``smooth``, ``chunk``).
 
         Returns
         -------
-        SkyView
+        SkyRender
             Per-emitter ``direct`` and ``indirect`` HEALPix maps in
             ``photon / s / sr``.
         """
-        from nyx.core.skyview import sky_view
+        from nyx.view.allsky import render_prepared
+        from nyx.view.response import SpectralResponse
 
-        return sky_view(self, instrument, obs, **kwargs)
+        name = self._resolve_instrument(instrument)
+        bundle = self._obs_bundles[name]
+        if not -bundle.nobs <= obs < bundle.nobs:
+            # JAX clamps out-of-bounds indices instead of raising, so this
+            # would otherwise silently return the last observation.
+            raise IndexError(f"obs {obs} out of range; {name!r} has {bundle.nobs} observations")
+
+        # The bundle already holds every emitter prepared against this
+        # observation, so the view reuses that rather than repeating it.
+        return render_prepared(
+            self.atmosphere,
+            {n: self.sources[n] for n in bundle.obs_data},
+            {n: select_obs(od, obs) for n, od in bundle.obs_data.items()},
+            select_obs(bundle.render_geometry, obs),
+            SpectralResponse.from_bandpass(self.instruments[name]),
+            label=name,
+            obs_index=obs,
+            **kwargs,
+        )
 
     def set_lightcurve(
         self,

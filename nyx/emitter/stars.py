@@ -3,6 +3,7 @@ import healpy as hp
 import jax.numpy as jnp
 import numpy as np
 from astropy.coordinates import ICRS, SkyCoord
+from astropy.time import Time
 from astropy.utils.data import download_file
 
 from nyx.core.coordinates import HEALPixCatalog, rotate_healpix
@@ -244,19 +245,7 @@ class Stars(BaseEmitter):
         lim_mag : float
             Limiting magnitude.  Brighter stars are resolved individually.
         """
-        catalog = np.load(
-            download_file(
-                "https://zenodo.org/records/15396676/files/gaiadr3.npy",
-                cache=True,
-            )
-        )
-        faint_map = np.load(
-            download_file(
-                "https://zenodo.org/records/15396676/files/gaia_mag15plus.npy",
-                cache=True,
-            )
-        )
-
+        catalog, faint_map = _load_gaia_dr3()
         g, bp, rp = _gaia_photometry(catalog)
 
         bright_mask = g < lim_mag
@@ -274,8 +263,105 @@ class Stars(BaseEmitter):
         return cls(geo, spectral_model, bright_ra, bright_dec, bright_conditions, sky_map)
 
 
+def gaia_star_field(geo, lim_mag: float = 7.0):
+    """Split Gaia DR3 into all-sky point sources and the background they leave.
+
+    :meth:`Stars.from_gaia_dr3` resolves individual stars only inside the
+    field of view, because that is all a Cherenkov camera ever sees, and
+    its diffuse map holds the complete catalog so that the in-scattering
+    integral does too.  Rendering the whole hemisphere -- a photograph,
+    an all-sky map -- needs the opposite split: bright stars as sharp
+    points *everywhere*, and everything else as a smooth map.
+
+    This builds that pair with the catalog partitioned exactly once, so
+    no star is counted twice::
+
+        points, background = gaia_star_field(geo, lim_mag=7.0)
+        emitters = {'stars': points, 'background': background, 'airglow': ...}
+
+    Parameters
+    ----------
+    geo : Geometry
+        Resolution configuration.
+    lim_mag : float
+        Split magnitude in the Gaia ``G`` band.  Brighter stars become
+        point sources, fainter ones stay in the map.  The naked-eye
+        limit is around 6.5; going much deeper costs catalog rows
+        without adding anything a picture can show.
+
+    Returns
+    -------
+    points : BrightStars
+        Catalog stars brighter than *lim_mag*, over the whole sky, as
+        individual point sources.
+    background : Stars
+        The unresolved remainder as a diffuse map: everything fainter
+        than *lim_mag* plus the pre-integrated faint-star map.
+
+    Notes
+    -----
+    Gaia saturates on the very brightest stars, so pair this with
+    :meth:`~nyx.emitter.bright_stars.BrightStars.from_anderson2012`,
+    which supplies exactly those and is disjoint from the Gaia catalog.
+
+    Requires network access on first use, for the catalog and for the
+    Gaia passbands from the SVO Filter Profile Service.
+    """
+    from nyx.emitter.bright_stars import BrightStars
+
+    catalog, faint_map = _load_gaia_dr3()
+    g, bp, rp = _gaia_photometry(catalog)
+    bright = g < lim_mag
+
+    npix = len(faint_map[0])
+    faint_flux = 10 ** (-0.4 * faint_map) + 1e-10
+    faint = ~bright
+    catalog_map = _build_gaia_catalog_map(
+        g[faint], bp[faint], rp[faint], catalog["ra"][faint], catalog["dec"][faint], npix
+    )
+    # The colour grid spans the whole catalog, so both halves interpolate
+    # the same spectral library over the same axis.
+    background = Stars(
+        geo,
+        _build_gaia_spectral_model(bp, rp, geo),
+        np.zeros(0),
+        np.zeros(0),
+        np.zeros((0, 3)),
+        faint_flux + catalog_map,
+    )
+
+    coords = SkyCoord(
+        ra=catalog["ra"][bright] * u.deg,
+        dec=catalog["dec"][bright] * u.deg,
+        pm_ra_cosdec=np.zeros(int(bright.sum())) * u.mas / u.yr,
+        pm_dec=np.zeros(int(bright.sum())) * u.mas / u.yr,
+        obstime=Time(_GAIA_DR3_EPOCH),
+        frame="icrs",
+    )
+    points = BrightStars(
+        geo,
+        _build_gaia_spectral_model(bp, rp, geo, horizon_mask=True),
+        coords,
+        np.column_stack([g[bright], bp[bright], rp[bright]]),
+    )
+    return points, background
+
+
 # Gaia DR3
 _NO_PHOTOMETRY_MAG = 99.0
+
+# Reference epoch of the Gaia DR3 astrometry.
+_GAIA_DR3_EPOCH = "J2016.0"
+
+_GAIA_CATALOG_URL = "https://zenodo.org/records/15396676/files/gaiadr3.npy"
+_GAIA_FAINT_MAP_URL = "https://zenodo.org/records/15396676/files/gaia_mag15plus.npy"
+
+
+def _load_gaia_dr3():
+    """Download (once) and load the Gaia DR3 catalog and faint-star map."""
+    catalog = np.load(download_file(_GAIA_CATALOG_URL, cache=True))
+    faint_map = np.load(download_file(_GAIA_FAINT_MAP_URL, cache=True))
+    return catalog, faint_map
 
 
 def _gaia_photometry(catalog):
@@ -312,8 +398,20 @@ def _build_gaia_catalog_map(g, bp, rp, ra, dec, npix):
     return np.vstack([np.bincount(hp_inds, 10 ** (-0.4 * mag), npix) for mag in (g, bp, rp)])
 
 
-def _build_gaia_spectral_model(bp, rp, geo):
+def _build_gaia_spectral_model(bp, rp, geo, horizon_mask: bool = False):
     """Build a Pickles (1998) spectral model for Gaia photometry.
+
+    Parameters
+    ----------
+    bp, rp : np.ndarray
+        Catalog BP and RP magnitudes; only their range is used, to size
+        the colour axis of the interpolation grid.
+    geo : Geometry
+        Resolution configuration.
+    horizon_mask : bool
+        Read a fourth condition column as a 0/1 switch, which is what
+        :class:`~nyx.emitter.bright_stars.BrightStars` appends to mask
+        the stars that are below the horizon.
     """
     rp_bp = rp - bp
 
@@ -333,4 +431,5 @@ def _build_gaia_spectral_model(bp, rp, geo):
         geo.wvls,
         color_fn=lambda c: c[..., 2] - c[..., 1],  # RP - BP
         mag_fn=lambda c: c[..., 0],  # G
+        active_fn=(lambda c: c[..., 3]) if horizon_mask else None,
     )

@@ -10,7 +10,7 @@ import jax.numpy as jnp
 
 from nyx.core.parameter import Parameter, _is_param
 
-__all__ = ["per_obs_filter", "tile_per_obs", "_navigate"]
+__all__ = ["per_obs_filter", "select_obs", "tile_per_obs", "_navigate"]
 
 
 def _navigate(obj: Any, path: tuple[Any, ...]) -> Any:
@@ -96,6 +96,31 @@ def per_obs_filter[T](tree: T) -> T:
 
             filt = eqx.tree_at(_at_path, filt, replacement)
     return filt
+
+
+def select_obs[T](tree: T, index: int) -> T:
+    """Slice observation *index* out of a stacked per-observation tree.
+
+    The inverse of :func:`tile_per_obs`, and the same partition
+    :meth:`~nyx.core.scene.Scene.render` vmaps over -- indexed instead of
+    mapped, for the paths that want one observation rather than all of
+    them.
+
+    Parameters
+    ----------
+    tree : pytree
+        Any tree carrying ``_per_obs`` declarations or per-observation
+        :class:`~nyx.core.parameter.Parameter` leaves.
+    index : int
+        Observation to take.
+
+    Returns
+    -------
+    The same tree with the leading observation axis removed from every
+    per-observation leaf, and everything else untouched.
+    """
+    per_obs, shared = eqx.partition(tree, per_obs_filter(tree))
+    return eqx.combine(shared, jax.tree.map(lambda x: x[index], per_obs))
 
 
 def tile_per_obs[T](tree: T, nobs: int) -> T:
