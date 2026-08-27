@@ -84,8 +84,9 @@ class PixelLattice(eqx.Module):
         return self.offset.shape[0]
 
     @property
-    def centers(self) -> jax.Array:
-        """Pixel centres in the offset frame, radians. Shape (n_pixels, 2)."""
+    def window_centers(self) -> jax.Array:
+        """Centre of each pixel's response window, radians. Shape (n_pixels, 2).
+        """
         middle = (jnp.asarray(self.grid_shape, dtype=self.step.dtype) - 1.0) / 2.0
         return self.origin + (self.offset + middle) * self.step
 
@@ -285,6 +286,38 @@ def integrate_response(lattice: PixelLattice, values):
     wy = jnp.asarray(_simpson_weights(height)) * lattice.step[0]
     wx = jnp.asarray(_simpson_weights(width)) * lattice.step[1]
     return jnp.einsum("...jk,j,k->...", values, wy, wx)
+
+
+def response_centroid(lattice: PixelLattice, values):
+    """Where each pixel looks.
+    
+    Parameters
+    ----------
+    lattice : PixelLattice
+        Supplies the node spacing and each window's corner.
+    values : array, shape (..., n_pixels, height, width)
+        Pixel response values.
+
+    Returns
+    -------
+    jax.Array, shape ``values.shape[:-2] + (2,)``
+        Field offset per pixel as ``[lon, lat]``, in radians.
+    """
+    height, width = lattice.grid_shape
+    if values.shape[-2:] != (height, width):
+        raise ValueError(f"response is {values.shape[-2:]}, lattice window is {(height, width)}")
+    total = jnp.sum(values, axis=(-2, -1))
+    rows = jnp.arange(height, dtype=lattice.step.dtype)
+    cols = jnp.arange(width, dtype=lattice.step.dtype)
+    node = jnp.stack(
+        [jnp.einsum("...jk,j->...", values, rows), jnp.einsum("...jk,k->...", values, cols)],
+        axis=-1,
+    )
+    # A dark pixel has no first moment; fall back to the window centre.
+    middle = (jnp.asarray(lattice.grid_shape, dtype=lattice.step.dtype) - 1.0) / 2.0
+    safe = jnp.where(total > 0, total, 1.0)[..., None]
+    node = jnp.where((total > 0)[..., None], node / safe, middle)
+    return lattice.origin + (lattice.offset + node) * lattice.step
 
 
 # Regular-grid interpolation

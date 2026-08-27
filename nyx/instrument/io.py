@@ -4,6 +4,7 @@ import h5py
 import numpy as np
 from scipy.interpolate import interp1d
 
+from nyx.core.units import to_wavelength_nm
 from nyx.instrument._interpolation import PixelLattice
 
 try:
@@ -11,29 +12,50 @@ try:
 except ImportError:
     u = None
 
-
-#: The only instrument file format nyx reads or writes.  It stores the
-#: focal-plane geometry as the lattice the pixel response grids are windows
-#: onto -- an origin, a step, and one integer node offset per pixel -- rather
-#: than as an explicit ``(n_pixels, 2, grid_dim)`` table of coordinates.
-#: Convert files written before 2.0 with ``scripts/migrate_instrument.py``.
 FORMAT_VERSION = "2.0"
 
 
 # Shared helpers
 
 
-def _load_bandpass(f):
-    """Read bandpass from an open HDF5 file handle, return callable."""
-    wvl_tab = f["bandpass/wavelength"][:]
-    transmission_tab = f["bandpass/transmission"][:]
+def tabulated_bandpass(wavelength_nm, transmission):
+    """Build an instrument bandpass callable from a tabulated curve.
+
+    A callable taking wavelengths -- a plain array in nm or an astropy
+    :class:`~astropy.units.Quantity` -- and returning the instrument's
+    effective aperture times transmission there, in m^2.  Linearly
+    interpolated between samples and zero outside the tabulated range.
+
+    Parameters
+    ----------
+    wavelength_nm : array, shape (n,)
+        Sample wavelengths in nm (or a Quantity), strictly increasing.
+    transmission : array, shape (n,)
+        Bandpass value at each sample.
+
+    Returns
+    -------
+    callable
+        ``wavelength -> bandpass``.
+    """
+    wvl_tab = np.asarray(to_wavelength_nm(wavelength_nm), dtype=float).reshape(-1)
+    transmission_tab = np.asarray(transmission, dtype=float).reshape(-1)
+    if wvl_tab.size < 2:
+        raise ValueError(
+            f"a bandpass needs at least two samples to span a band, got {wvl_tab.size}"
+        )
+
     interp = interp1d(wvl_tab, transmission_tab, kind="linear", bounds_error=False, fill_value=0.0)
 
     def bandpass_func(wavelength):
-        wvl_val = wavelength.value if hasattr(wavelength, "value") else wavelength
-        return interp(wvl_val)
+        return interp(np.asarray(to_wavelength_nm(wavelength)))
 
     return bandpass_func
+
+
+def _load_bandpass(f):
+    """Read bandpass from an open HDF5 file handle, return callable."""
+    return tabulated_bandpass(f["bandpass/wavelength"][:], f["bandpass/transmission"][:])
 
 
 def _save_common(f, inst, wavelength_range, wavelength_samples, metadata):
