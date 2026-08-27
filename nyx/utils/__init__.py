@@ -1,3 +1,5 @@
+from .camera import camera_image
+from .convergence import FitTrace, record_fit
 from .interpolator import UnitRegularGridInterpolator
 from .profiler import profile_render, profile_scene
 from .spectra import (
@@ -21,4 +23,7 @@ __all__ = [
     "UnitRegularGridInterpolator",
     "profile_scene",
     "profile_render",
+    "FitTrace",
+    "record_fit",
+    "camera_image",
 ]

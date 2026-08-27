@@ -79,13 +79,18 @@ class Optimizer:
         scene, sol = opt.run(scene, max_steps=256)
 
     Manual stepping, for progress reporting (minimiser solvers only;
-    least-squares solver state cannot pass through :func:`jax.jit`)::
+    least-squares solver state cannot be jitted).  Wrap the step with
+    :func:`equinox.filter_jit` rather than :func:`jax.jit`: some solver
+    states (``optx.LBFGS``) carry non-array leaves::
 
         opt = Optimizer(loss_fn, optx.BFGS(rtol=1e-5, atol=1e-5))
         state = opt.init_state(scene)
-        step = jax.jit(opt.step)
+        step = eqx.filter_jit(opt.step)
         for _ in range(200):
             scene, loss, state = step(scene, state)
+
+    Or let :func:`nyx.utils.convergence.record_fit` drive the same loop
+    and record the path the fit takes.
     """
 
     def __init__(self, fn: Callable[[Any], Any], solver: Any) -> None:
@@ -148,6 +153,28 @@ class Optimizer:
         aux_struct = None
         return self._solver.init(inner, diff, static, {}, f_struct, aux_struct, frozenset())
 
+    def loss(self, model: Any) -> jax.Array:
+        """Scalar loss at *model*, without taking a solver step.
+
+        On the least-squares path -- and for a residuals *fn* handed to a
+        minimiser -- this is ``sum(r ** 2)``.
+
+        Parameters
+        ----------
+        model : pytree
+            Model to evaluate.
+
+        Returns
+        -------
+        jax.Array
+            Scalar loss.
+        """
+        if self._fn_is_scalar is None:
+            self._check_fn(model)
+        if self._fn_is_scalar:
+            return self._fn_user(model)
+        return _sum_of_squares(self._fn_user(model))
+
     def step[T](self, model: T, state: Any) -> tuple[T, jax.Array, Any]:
         """One solver step.
 
@@ -168,13 +195,8 @@ class Optimizer:
         state : optimistix solver state
             Updated solver state.
         """
-        if self._fn_is_scalar is None:
-            self._check_fn(model)
+        loss = self.loss(model)
         inner, diff, static = self._make_inner(model)
-        if self._fn_is_scalar:
-            loss = self._fn_user(model)
-        else:
-            loss = _sum_of_squares(self._fn_user(model))
         new_diff, new_state, _ = self._solver.step(inner, diff, static, {}, state, frozenset())
         new_model = eqx.combine(new_diff, static, is_leaf=_is_param)
         return new_model, loss, new_state
