@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=84.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -52,16 +52,16 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7.0",
-    "pytest-cov>=4.0",
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
     "pytest-doctestplus",
-    "jupyter>=1.0",
-    "mypy>=1.0",
-    "nbclient>=0.7.0",
-    "ruff>=0.1.0",
-    "asv>=0.6.0",
-    "virtualenv>=20.0",
-    "commitizen>=3.12.0",
+    "jupyter>=1.1.1",
+    "mypy>=2.3.1",
+    "nbclient>=0.11.0",
+    "ruff>=0.16.5",
+    "asv>=0.6.6",
+    "virtualenv>=21.7.7",
+    "commitizen>=4.18.0",
 ]
 docs = [
     "sphinx",
