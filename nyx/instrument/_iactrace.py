@@ -1,6 +1,23 @@
+"""Adapting an iactrace effective-aperture table to a nyx instrument.
+
+A table can arrive two ways, and both end up in :func:`build_from_table`:
+
+- from a live scan (:func:`build_from_iactrace`), which needs iactrace
+  installed, and
+- from a ``.npz`` file iactrace wrote earlier
+  (:func:`load_aperture_table`), which needs nothing but numpy.
+
+The second is the normal path.  The scan is hours of Monte-Carlo ray
+tracing; nyx should read its result, not repeat it, and reading it must
+not require the ray tracer to be installed at all.
+"""
+
 from __future__ import annotations
 
+import json
 import warnings
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -12,6 +29,120 @@ _MISSING = (
     "from_iactrace needs the iactrace ray tracer, which nyx does not require by "
     'default.  Install it with `pip install "nyx[iactrace]"`.'
 )
+
+#: Marker iactrace writes into an effective-aperture archive; see
+#: ``iactrace.io.aperture_table`` for the format.
+_TABLE_FORMAT = "iactrace-aperture-table"
+
+#: Major version of that format this reader understands.
+_TABLE_MAJOR = "1"
+
+#: The arrays a table is made of, under their own names in the archive.
+_TABLE_ARRAYS = ("origin", "step", "offset", "values", "wavelengths", "spectral_area")
+
+
+class ApertureTable:
+    """An iactrace effective-aperture table, read from a file.
+
+    Field-for-field what ``iactrace.analysis.EffectiveApertureTable``
+    carries, so :func:`build_from_table` cannot tell the two apart.  It
+    exists so that reading a saved table needs numpy and nothing else --
+    the ray tracer is only needed to *produce* one.
+
+    Attributes
+    ----------
+    origin : np.ndarray, shape (2,)
+        Field offset of lattice node ``(0, 0)``, ``[lon, lat]`` in radians.
+    step : np.ndarray, shape (2,)
+        Node spacing along ``[lon, lat]``, in radians.
+    offset : np.ndarray, shape (n_pixels, 2)
+        Node index of each pixel's response window corner.
+    values : np.ndarray, shape (n_pixels, W, W)
+        Effective area at each node, in m^2.
+    on_axis_area : float
+        Band-averaged on-axis effective area over all pixels, m^2; what
+        :attr:`values` is normalised by.
+    wavelengths : np.ndarray, shape (K,)
+        Bandpass grid, in nm.
+    spectral_area : np.ndarray, shape (K,)
+        On-axis total effective area at each wavelength, in m^2.
+    meta : dict
+        Provenance recorded by the scan.
+    """
+
+    __slots__ = (
+        "meta",
+        "offset",
+        "on_axis_area",
+        "origin",
+        "spectral_area",
+        "step",
+        "values",
+        "wavelengths",
+    )
+
+    def __init__(
+        self,
+        origin: np.ndarray,
+        step: np.ndarray,
+        offset: np.ndarray,
+        values: np.ndarray,
+        on_axis_area: float,
+        wavelengths: np.ndarray,
+        spectral_area: np.ndarray,
+        meta: dict,
+    ):
+        self.origin = origin
+        self.step = step
+        self.offset = offset
+        self.values = values
+        self.on_axis_area = on_axis_area
+        self.wavelengths = wavelengths
+        self.spectral_area = spectral_area
+        self.meta = meta
+
+    def __repr__(self) -> str:
+        return (
+            f"ApertureTable({self.values.shape[0]} pixels, "
+            f"{self.values.shape[-1]}x{self.values.shape[-1]} window, "
+            f"{self.wavelengths[0]:.0f}-{self.wavelengths[-1]:.0f} nm)"
+        )
+
+
+def load_aperture_table(path: str | Path) -> ApertureTable:
+    """Read an effective-aperture table iactrace saved to ``.npz``.
+
+    Parameters
+    ----------
+    path : str or Path
+        A file written by ``iactrace.io.save_aperture_table`` (or
+        ``EffectiveApertureTable.save``).
+
+    Returns
+    -------
+    ApertureTable
+        Ready for :func:`build_from_table`.
+
+    Raises
+    ------
+    ValueError
+        If the file is not an aperture table, or is a format version this
+        reader does not know.
+    """
+    path = Path(path)
+    with np.load(path, allow_pickle=False) as archive:
+        if "format" not in archive or str(archive["format"]) != _TABLE_FORMAT:
+            raise ValueError(
+                f"{path} is not an {_TABLE_FORMAT} file; write one with "
+                f"iactrace.io.save_aperture_table"
+            )
+        version = str(archive["format_version"])
+        if version.split(".")[0] != _TABLE_MAJOR:
+            raise ValueError(f"{path} is format {version}, and this nyx reads {_TABLE_MAJOR}.x")
+        fields: dict[str, Any] = {name: archive[name] for name in _TABLE_ARRAYS}
+        fields["on_axis_area"] = float(archive["on_axis_area"])
+        fields["meta"] = json.loads(str(archive["meta"]))
+    return ApertureTable(**fields)
 
 
 def build_from_iactrace(geo, telescope, camera, **scan_kwargs):
@@ -25,8 +156,16 @@ def build_from_iactrace(geo, telescope, camera, **scan_kwargs):
 
 
 def build_from_table(geo, table):
-    """Adapt an ``EffectiveApertureTable`` to an instrument."""
+    """Adapt an effective-aperture table to an instrument.
+
+    *table* is either an ``EffectiveApertureTable`` in hand, an
+    :class:`ApertureTable` read from disk, or a path to a saved one --
+    the last is read here, so no iactrace import is involved.
+    """
     from nyx.instrument.effective_aperture import EffectiveApertureInstrument
+
+    if isinstance(table, str | Path):
+        table = load_aperture_table(table)
 
     lattice = PixelLattice(
         origin=table.origin,

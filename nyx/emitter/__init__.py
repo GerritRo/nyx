@@ -1,20 +1,25 @@
+"""Emitters: the things in the sky nyx renders.
+
+Each one prepares itself against an :class:`~nyx.core.observation.Observation`
+and hands the render loop a :class:`~nyx.core.protocols.SourceObsData`.
+"""
+
 from ._base import BaseEmitter
 from .airglow import Airglow
-from .bright_stars import BrightStars
 from .moon import Moon
 from .point_source import PointSource, VariableSource, blackbody_photon_flux
-from .stars import Stars, gaia_star_field
+from .stars import BrightStars, Stars, gaia_star_field
 from .zodiacal import ZodiacalLight
 
 __all__ = [
+    "Airglow",
     "BaseEmitter",
     "BrightStars",
-    "Stars",
-    "ZodiacalLight",
     "Moon",
     "PointSource",
+    "Stars",
     "VariableSource",
+    "ZodiacalLight",
     "blackbody_photon_flux",
-    "Airglow",
     "gaia_star_field",
 ]

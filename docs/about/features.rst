@@ -105,8 +105,8 @@ Source spectra are described by composable spectral models
 nyx bundles solar, stellar (Pickles 1998), and empirical spectral templates,
 together with CALSPEC standards and SVO filter profiles (see :doc:`data`).
 
-Parameter handling and fitting
-------------------------------
+Parameter handling and inference
+--------------------------------
 
 Model parameters are differentiable objects with explicit
 characteristic scales (:class:`~nyx.core.Parameter`), which keeps the optimiser
@@ -117,10 +117,12 @@ well-conditioned across physically disparate quantities:
   :func:`~nyx.core.freeze_all`, :func:`~nyx.core.unfreeze_all`) to control what
   is fit.
 - **Automatic scaling** of parameters (:func:`~nyx.core.autoscale`).
-- **Optimisation** via the :class:`~nyx.core.Optimizer`, built on
+- **Optimisation** via the :class:`~nyx.infer.Optimizer`, built on
   `Optimistix <https://docs.kidger.site/optimistix/>`_, with multi-target joint
-  fitting through :class:`~nyx.core.MultiTargetFit`.
-- **Uncertainty estimation** with :func:`~nyx.core.parameter_errors`.
+  fitting through :class:`~nyx.infer.MultiTargetFit`.
+- **Uncertainty estimation** with :func:`~nyx.infer.parameter_errors`.
+- **Posterior sampling** with :func:`~nyx.infer.scene_model`, which reads the
+  same frozen/unfrozen switch and hands the model to NumPyro.
 
 Observation and geometry model
 ------------------------------

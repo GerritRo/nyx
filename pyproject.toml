@@ -51,9 +51,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-view = [
-    "matplotlib",
-]
 iactrace = [
     "iactrace",
 ]
@@ -80,6 +77,7 @@ docs = [
     "sphinx-automodapi",
     "sphinx-design",
     "myst-nb",
+    "nyx-view",      # the viewing addon, used by the example notebooks
 ]
 
 [project.urls]
@@ -88,13 +86,28 @@ Documentation = "https://gerritro.github.io/nyx/"
 Repository = "https://github.com/GerritRo/nyx.git"
 Issues = "https://github.com/GerritRo/nyx/issues"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["nyx*"]
-exclude = ["tests*", "examples*"]
+# The bundled datasets live in `data/` at the repository root rather than
+# inside the package.  A wheel has no repository root, so the directory is
+# mapped into the package as `nyx.data`; `nyx.ASSETS_PATH` looks in both
+# places and finds whichever exists.
+[tool.setuptools]
+packages = [
+    "nyx",
+    "nyx.atmosphere",
+    "nyx.core",
+    "nyx.data",
+    "nyx.emitter",
+    "nyx.infer",
+    "nyx.instrument",
+    "nyx.utils",
+]
+
+[tool.setuptools.package-dir]
+"nyx.data" = "data"
 
 [tool.setuptools.package-data]
-nyx = ["py.typed", "data/*"]
+nyx = ["py.typed"]
+"nyx.data" = ["*.dat"]
 
 [tool.setuptools.dynamic]
 version = {attr = "nyx.__version__"}
@@ -112,7 +125,7 @@ warn_unused_ignores = true
 strict_equality = true
 ignore_missing_imports = true
 follow_imports = "silent"
-files = ["nyx/core"]
+files = ["nyx/core", "nyx/infer"]
 
 [tool.ruff]
 line-length = 100

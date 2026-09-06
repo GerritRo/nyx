@@ -5,15 +5,6 @@ from .coordinates import (
     rotation_matrix_from_altaz,
 )
 from .filters import per_obs_filter, tile_per_obs
-from .fitting import (
-    FitSummary,
-    MultiTargetFit,
-    Optimizer,
-    ProfileGrid,
-    parameter_correlation,
-    parameter_errors,
-    rescale_from_errors,
-)
 from .geometry import Geometry
 from .io import FitResult, ObservationRecord, load_fit, save_fit
 from .observation import (
@@ -120,14 +111,6 @@ __all__ = [
     "parameters_table",
     "dump_params",
     "n_trainable",
-    # fitting
-    "Optimizer",
-    "MultiTargetFit",
-    "FitSummary",
-    "ProfileGrid",
-    "parameter_errors",
-    "parameter_correlation",
-    "rescale_from_errors",
     # io
     "FitResult",
     "ObservationRecord",

@@ -102,7 +102,7 @@ def scene_model(
     Parameters
     ----------
     model : Scene or MultiTargetFit
-        Free parameters unfrozen, as :class:`~nyx.core.fitting.Optimizer`
+        Free parameters unfrozen, as :class:`~nyx.infer.Optimizer`
         reads it.
     data : mapping of {instrument: array}
         Observed pixel rates, ``(nobs, n_pixels)``.

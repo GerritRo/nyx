@@ -15,3 +15,4 @@ These modules contain the main user-facing APIs:
    instrument
    atmosphere
    emitters
+   infer

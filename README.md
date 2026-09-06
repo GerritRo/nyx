@@ -15,6 +15,29 @@ nyx models the night sky background for IACT telescopes, enabling parameter esti
 - Zodiacal light, airglow, lunar brightness, and stellar catalogs are supported as emitters
 - Effective aperture instrument models with spectral response
 
+## Layout
+
+nyx is the forward model and the machinery for fitting it — nothing else.
+
+| Package | Holds |
+| --- | --- |
+| `nyx.core` | the model: geometry, observations, parameters, the render pipeline |
+| `nyx.emitter` | what is in the sky — moon, airglow, zodiacal light, stars |
+| `nyx.atmosphere` | what the atmosphere does to it |
+| `nyx.instrument` | what the telescope and camera record |
+| `nyx.infer` | fitting a model to data, and sampling its posterior |
+| `nyx.utils` | spectral helpers and profiling |
+| `data/` | the bundled scientific datasets, at the repository root |
+
+Drawing any of it — hemisphere maps, all-sky photographs, focal-plane
+displays — is a separate package,
+[nyx-view](https://github.com/GerritRo/nyx-view), so nyx itself has no
+plotting dependency:
+
+```bash
+pip install nyx-view
+```
+
 ## Installation
 
 ```bash

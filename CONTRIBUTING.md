@@ -69,7 +69,7 @@ This walks you through an interactive prompt:
    chore: Other changes that don't modify src or test files
 
 ? What is the scope of this change? (press enter to skip)
-  core, atmosphere, emitter, instrument, utils
+  core, atmosphere, emitter, infer, instrument, utils
 
 ? Write a short, imperative description of the change:
   > add lunar phase correction to Jones2013

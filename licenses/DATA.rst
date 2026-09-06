@@ -18,8 +18,8 @@ configurations that rely on this dataset requires separate arrangement with
 ESA.
 
 
-Bundled data (shipped in ``nyx/data/``)
----------------------------------------
+Bundled data (shipped in ``data/`` at the repository root)
+----------------------------------------------------------
 
 Pickles (1998) stellar spectral atlas
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

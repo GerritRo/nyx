@@ -24,11 +24,3 @@ Observation
    :no-inheritance-diagram:
    :no-main-docstring:
    :allowed-package-names: nyx
-
-Fitting
----------
-
-.. automodapi:: nyx.core.fitting
-   :no-inheritance-diagram:
-   :no-main-docstring:
-   :allowed-package-names: nyx

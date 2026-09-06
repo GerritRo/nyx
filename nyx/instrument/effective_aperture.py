@@ -255,10 +255,39 @@ class _BaseApertureInstrument(InstrumentModel):
 
     @classmethod
     def from_iactrace_table(cls, geo, table):
-        """Build an instrument from an already-scanned effective-aperture table::
+        """Build an instrument from an already-scanned effective-aperture table.
 
-        table = iactrace.analysis.effective_aperture(telescope, camera)
-        inst = EffectiveApertureInstrument.from_iactrace_table(geo, table)
+        The scan is the expensive step -- hours of Monte-Carlo ray tracing --
+        so the normal workflow is to do it once in iactrace, save the table,
+        and build from the file ever after::
+
+            # once, wherever iactrace is installed
+            table = iactrace.analysis.effective_aperture(telescope, camera, ...)
+            table.save("CT3_aperture.npz")
+
+            # ever after, with no ray tracer in the environment
+            inst = EffectiveApertureInstrument.from_iactrace_table(geo, "CT3_aperture.npz")
+
+        Parameters
+        ----------
+        geo : Geometry
+            Resolution configuration.
+        table : path-like or EffectiveApertureTable
+            A ``.npz`` file written by ``iactrace.io.save_aperture_table``, or
+            a table object in hand.  Reading a file needs only numpy; iactrace
+            is required only to produce one.
+
+        Returns
+        -------
+        EffectiveApertureInstrument
+
+        Notes
+        -----
+        The resulting instrument is a nyx object like any other, so
+        :meth:`save` writes it in nyx's own HDF5 format and :meth:`load`
+        reads it back.  Keep the ``.npz`` if you want the raw table (its
+        un-normalised areas and its provenance); keep the ``.h5`` if you
+        want the instrument.
         """
         from nyx.instrument._iactrace import build_from_table
 
