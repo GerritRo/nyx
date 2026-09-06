@@ -5,7 +5,15 @@ from .coordinates import (
     rotation_matrix_from_altaz,
 )
 from .filters import per_obs_filter, tile_per_obs
-from .fitting import MultiTargetFit, Optimizer, parameter_errors
+from .fitting import (
+    FitSummary,
+    MultiTargetFit,
+    Optimizer,
+    ProfileGrid,
+    parameter_correlation,
+    parameter_errors,
+    rescale_from_errors,
+)
 from .geometry import Geometry
 from .io import FitResult, ObservationRecord, load_fit, save_fit
 from .observation import (
@@ -16,12 +24,15 @@ from .observation import (
 from .parameter import (
     Parameter,
     autoscale,
+    dump_params,
     freeze,
     freeze_all,
+    n_trainable,
+    parameters_table,
     unfreeze,
     unfreeze_all,
 )
-from .pipeline import render
+from .pipeline import contributions, render
 from .protocols import (
     AtmosphereModel,
     AtmosphereResult,
@@ -87,6 +98,7 @@ __all__ = [
     "Scene",
     # pipeline
     "render",
+    "contributions",
     # protocols
     "SkySource",
     "PointSourceData",
@@ -105,10 +117,17 @@ __all__ = [
     "unfreeze",
     "freeze_all",
     "unfreeze_all",
+    "parameters_table",
+    "dump_params",
+    "n_trainable",
     # fitting
     "Optimizer",
     "MultiTargetFit",
+    "FitSummary",
+    "ProfileGrid",
     "parameter_errors",
+    "parameter_correlation",
+    "rescale_from_errors",
     # io
     "FitResult",
     "ObservationRecord",

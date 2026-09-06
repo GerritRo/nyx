@@ -46,12 +46,12 @@ def _dump_observation(group: h5py.Group, obs: Observation) -> None:
     g.attrs["ngrid"] = int(obs.geom.ngrid)
     g.attrs["fov_rad"] = float(obs.geom.fov)
 
-    group.attrs["refract_pointing"] = bool(getattr(obs, "_refract_pointing", False))
+    group.attrs["refract_pointing"] = bool(obs._refract_pointing)
 
     # AltAz refraction kwargs (pressure, temperature, ...).  Each may be
     # a plain Python value or an astropy Quantity; we store the unit
     # string as a sibling attribute when present.
-    altaz_kwargs = getattr(obs, "_altaz_kwargs", {}) or {}
+    altaz_kwargs = obs._altaz_kwargs or {}
     if altaz_kwargs:
         gak = group.create_group("altaz_kwargs")
         for k, v in altaz_kwargs.items():
@@ -215,9 +215,9 @@ def load_fit(path: str | os.PathLike[str]) -> FitResult:
 
     The result is a :class:`FitResult` with ``params`` (a plain
     ``{path: ndarray}`` dict) and ``observations`` (a dict of
-    :class:`ObservationRecord`).  No Scene is reconstructed — load
-    the originals into a fresh Scene via :meth:`Scene.load_params`
-    if you want to render again.
+    :class:`ObservationRecord`).  No Scene is reconstructed — rebuild
+    one and feed the values back with
+    :meth:`~nyx.core.scene.Scene.set_params` if you want to render again.
 
     Parameters
     ----------

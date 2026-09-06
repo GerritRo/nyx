@@ -13,21 +13,13 @@ from nyx.emitter._base import BaseEmitter
 
 
 def _airglow_model_fn(base_spectra):
-    """Create airglow model function: SFU(t)-scaled van Rhijn x base spectrum.
+    """Close over ``base_spectra`` (n_wvl,) to give SFU(t) x van Rhijn x spectrum.
 
-    Parameters
-    ----------
-    base_spectra : jax.Array, shape (n_wvl,)
-        Base airglow spectral radiance (captured in closure).
-
-    Returns
-    -------
-    callable
-        ``(coeffs, conditions) -> radiance``.  *coeffs* are the trainable
-        polynomial coefficients of the SFU light curve, lowest order
-        first; a scalar is a constant SFU.  *conditions* are ``(..., 2)``:
-        the van Rhijn weight and the hours elapsed since the reference
-        epoch, the latter identical across sky pixels.
+    The returned ``(coeffs, conditions) -> radiance`` takes the trainable
+    SFU polynomial coefficients lowest order first -- a scalar being a
+    constant SFU -- and conditions ``(..., 2)`` pairing the van Rhijn
+    weight with the hours since the reference epoch, the latter identical
+    across sky pixels.
     """
 
     def fn(coeffs, conditions):
@@ -41,22 +33,10 @@ def _airglow_model_fn(base_spectra):
 
 
 def _van_rhijn(altitude, height_km):
-    """Van Rhijn function for airglow zenith dependence.
+    """Van Rhijn weight at each altitude (radians).
 
-    The path length through a thin emitting shell, relative to the
-    vertical one.
-
-    Parameters
-    ----------
-    altitude : array
-        Altitude angle in radians.
-    height_km : float
-        Emission layer height in km.
-
-    Returns
-    -------
-    array
-        Van Rhijn weight at each position.
+    The path length through a thin emitting shell at ``height_km``,
+    relative to the vertical one.
     """
     return thin_shell_airmass(np.pi / 2 - np.asarray(altitude), height_km)
 
@@ -86,6 +66,7 @@ class Airglow(BaseEmitter):
     ):
         self._spectral_model = spectral_model
         self._height_km = height_km
+        self._geo_signature = geo.signature
         self._t_ref = t_ref
 
     @property
@@ -106,16 +87,8 @@ class Airglow(BaseEmitter):
     def prepare(self, obs) -> SourceObsData:
         """Precompute van Rhijn weights and observation times.
 
-        Parameters
-        ----------
-        obs : Observation
-
-        Returns
-        -------
-        SourceObsData
-            ``diffuse_conditions`` of shape ``(nobs, nsky, 2)``: the van
-            Rhijn weight per sky pixel, and the hours since :attr:`t_ref`
-            for that observation.
+        ``diffuse_conditions`` comes out ``(nobs, nsky, 2)``: the van Rhijn
+        weight per sky pixel, and the hours since :attr:`t_ref`.
         """
         altitudes = obs.geom.lat  # (nsky,) HEALPix altitudes in rad
         vr = _van_rhijn(altitudes, self._height_km)  # (nsky,), fixed in AltAz
@@ -130,7 +103,7 @@ class Airglow(BaseEmitter):
                 ],
                 axis=-1,
             ),
-            _per_obs=("diffuse_conditions",),
+            per_obs=("diffuse_conditions",),
         )
 
     @classmethod
@@ -154,9 +127,8 @@ class Airglow(BaseEmitter):
         Parameters
         ----------
         geo : Geometry
-            Resolution configuration (provides wavelengths).
         sfu : float
-            Initial solar flux units value, i.e. ``params[0]``; the higher
+            Initial solar flux units, i.e. ``params[0]``; the higher
             coefficients start at zero, so the initial curve is flat.
         height_km : float
             Airglow emission layer height in km.

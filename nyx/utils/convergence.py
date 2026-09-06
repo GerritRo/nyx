@@ -27,11 +27,14 @@ A residuals function is fine either way -- it is reduced to
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable, Iterator, Mapping
 from typing import TYPE_CHECKING, Any
 
 import equinox as eqx
 import numpy as np
+
+from nyx import NyxWarning
 
 if TYPE_CHECKING:
     from nyx.core.fitting import Optimizer
@@ -107,6 +110,7 @@ def record_fit(
     stride: int = 1,
     jit: bool = True,
     callback: Callable[[int, float, Any], None] | None = None,
+    stop_on_diverged: bool = True,
 ) -> FitTrace:
     """Step *opt* over *model*, recording the loss and the probes.
 
@@ -130,7 +134,8 @@ def record_fit(
     max_steps : int, optional
         Number of solver steps to take (default 200).  Unlike
         :meth:`~nyx.core.fitting.Optimizer.run` this is not a ceiling on
-        an early-terminating loop: exactly this many steps are taken.
+        an early-terminating loop: exactly this many steps are taken,
+        unless the loss diverges and *stop_on_diverged* is set.
     stride : int, optional
         Record every ``stride``-th step (default: every one).
     jit : bool, optional
@@ -138,6 +143,12 @@ def record_fit(
     callback : callable, optional
         ``(step, loss, model) -> None``, called at every recorded frame.
         Useful for a progress bar.
+    stop_on_diverged : bool, optional
+        Stop as soon as the loss goes non-finite, warn, and return the
+        trace up to that point (default).  Continuing spends the remaining
+        steps on a model that is already NaN, and the recorded path is
+        exactly what shows *when* it diverged.  Set False to take all
+        ``max_steps`` regardless.
 
     Returns
     -------
@@ -197,6 +208,16 @@ def record_fit(
         new_model, loss, state = step(model, state)
         if i % stride == 0:
             record(i, float(loss))
+        if stop_on_diverged and not np.isfinite(float(loss)):
+            warnings.warn(
+                f"the loss went non-finite at step {i}; stopping there. The trace "
+                f"holds the path up to that point, which is where to look for the "
+                f"parameter that ran away. Pass stop_on_diverged=False to take all "
+                f"{max_steps} steps anyway.",
+                NyxWarning,
+                stacklevel=2,
+            )
+            return FitTrace(steps, losses, history, model=model)
         model = new_model
     record(max_steps, float(loss_at(model)))
 

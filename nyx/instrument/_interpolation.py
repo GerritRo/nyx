@@ -1,3 +1,23 @@
+"""Sampling geometry of the focal plane.
+
+One convention holds for every angular grid in nyx, and both functions
+here rely on it:
+
+- a coordinate pair is ``[lon, lat]`` -- offset-frame longitude first,
+  matching ``(az, alt)`` everywhere else;
+- a 2-D grid is **lon-major**: axis 0 runs along longitude, axis 1 along
+  latitude, so ``values[i, j]`` sits at ``(lon[i], lat[j])`` and axis *k*
+  is indexed by column *k* of the coordinate pair.
+
+That is the layout the ray tracer tabulates a pixel response on, and it
+is fixed by the on-disk instrument format (``lattice/origin``,
+``lattice/step`` and ``lattice/offset`` are all stored lon-first), so
+:class:`~nyx.core.geometry.Geometry` builds its FOV evaluation grid the
+same way rather than the other way round.  Anything written against
+:attr:`~nyx.core.protocols.AtmosphereResult.scattering_map` or
+:attr:`~nyx.core.observation.SkyGeometry.fov_altaz_grid` follows it too.
+"""
+
 from functools import cache
 
 import equinox as eqx
@@ -10,22 +30,7 @@ LATTICE_TOL = 1e-3
 
 
 def _bilinear_coeffs(y_coords, x_coords, height, width):
-    """Compute bilinear interpolation coefficients and validity mask.
-
-    Parameters
-    ----------
-    y_coords, x_coords : jax.Array
-        Fractional grid coordinates.
-    height, width : int
-        Grid dimensions.
-
-    Returns
-    -------
-    y0, x0, fy, fx : jax.Array
-        Integer indices and fractional offsets.
-    valid_mask : jax.Array
-        Boolean mask for in-bounds coordinates.
-    """
+    """Corner indices, fractional offsets and in-bounds mask for bilinear lookup."""
     valid_mask = (
         (y_coords >= 0) & (y_coords < height - 1) & (x_coords >= 0) & (x_coords < width - 1)
     )
@@ -85,8 +90,7 @@ class PixelLattice(eqx.Module):
 
     @property
     def window_centers(self) -> jax.Array:
-        """Centre of each pixel's response window, radians. Shape (n_pixels, 2).
-        """
+        """Centre of each pixel's response window, radians. Shape (n_pixels, 2)."""
         middle = (jnp.asarray(self.grid_shape, dtype=self.step.dtype) - 1.0) / 2.0
         return self.origin + (self.offset + middle) * self.step
 
@@ -111,27 +115,14 @@ class PixelLattice(eqx.Module):
     def from_grid(cls, grid, values, tol: float = LATTICE_TOL) -> "PixelLattice":
         """Recover the lattice underlying explicit sample coordinates.
 
-        Parameters
-        ----------
-        grid : array, shape (n_pixels, 2, grid_dim)
-            Pixel sub-grid coordinates in radians.
-        values : array, shape (..., n_pixels, height, width)
-            Pixel response values.  Leading axes (e.g. a misalignment
-            table) are all checked.
-        tol : float
-            Alignment tolerance, in units of one response-grid step.
+        ``grid`` is ``(n_pixels, 2, grid_dim)`` in radians and ``values``
+        ``(..., n_pixels, height, width)``, every leading axis (e.g. a
+        misalignment table) checked.  ``tol`` is in units of one step.
 
-        Returns
-        -------
-        PixelLattice
-
-        Raises
-        ------
-        ValueError
-            If the response tables do not vanish on their boundary rows and
-            columns, or if the sample coordinates do not sit on the nodes of
-            a common lattice to within *tol*.  Both are required for the
-            projection to be separable; see :func:`project_lattice`.
+        Raises ``ValueError`` unless the responses vanish on their boundary
+        rows and columns and the sample coordinates sit on the nodes of a
+        common lattice: both make the projection separable, which is what
+        :func:`project_lattice` relies on.
         """
         grid = np.asarray(grid, dtype=np.float64)
         values = np.asarray(values)
@@ -179,18 +170,11 @@ class PixelLattice(eqx.Module):
 
 
 def _fit_lattice_axis(coords_1d, n_iter: int = 8):
-    """Least-squares (origin, step) of the lattice underlying *coords_1d*.
+    """Least-squares ``(origin, step, residual)`` of the lattice under *coords_1d*.
 
-    Parameters
-    ----------
-    coords_1d : ndarray, shape (n_pixels, grid_dim)
-        Sample positions of every pixel's response grid along one axis.
-
-    Returns
-    -------
-    origin, step : float
-    residual : float
-        Largest deviation of any sample from a lattice node, in steps.
+    ``coords_1d`` is ``(n_pixels, grid_dim)``, one axis of every pixel's
+    response grid; ``residual`` is the largest deviation of any sample from
+    a node, in steps.
     """
     flat = coords_1d.reshape(-1)
     step = float(np.median(np.diff(coords_1d, axis=1)))
@@ -218,20 +202,9 @@ def _fit_lattice_axis(coords_1d, n_iter: int = 8):
 def project_lattice(lattice: PixelLattice, values, coords, rates):
     """Project point sources onto pixels via the shared response lattice.
 
-    Parameters
-    ----------
-    lattice : PixelLattice
-        Focal-plane geometry.
-    values : jax.Array, shape (n_pixels, height, width)
-        Pixel response values.
-    coords : jax.Array, shape (n_sources, 2)
-        Source positions in the detector frame, in radians.
-    rates : jax.Array, shape (n_sources,)
-        Band-integrated source rates.
-
-    Returns
-    -------
-    jax.Array, shape (n_pixels,)
+    ``values`` is ``(n_pixels, height, width)``, ``coords`` ``(n_sources,
+    2)`` in the detector frame and ``rates`` the ``(n_sources,)``
+    band-integrated rates.  Returns ``(n_pixels,)``.
     """
     n_rows, n_cols = lattice.shape
     grid_h, grid_w = lattice.grid_shape
@@ -260,25 +233,14 @@ def project_lattice(lattice: PixelLattice, values, coords, rates):
 
 @cache
 def _simpson_weights(n: int) -> np.ndarray:
-    """Quadrature weights reproducing ``scipy`` Simpson on a unit-spaced axis.
-    """
+    """Quadrature weights reproducing ``scipy`` Simpson on a unit-spaced axis."""
     return simpson(np.eye(n), dx=1.0, axis=-1)
 
 
 def integrate_response(lattice: PixelLattice, values):
-    """Integrate each pixel's response over solid angle.
+    """Simpson-integrate each pixel's response ``(..., n_pixels, height, width)``.
 
-    Parameters
-    ----------
-    lattice : PixelLattice
-        Supplies the (uniform) node spacing along each axis.
-    values : array, shape (..., n_pixels, height, width)
-        Pixel response values.
-
-    Returns
-    -------
-    jax.Array, shape ``values.shape[:-2]``
-        Simpson-integrated weight per pixel.
+    Returns a weight per pixel, shape ``values.shape[:-2]``.
     """
     height, width = lattice.grid_shape
     if values.shape[-2:] != (height, width):
@@ -289,19 +251,10 @@ def integrate_response(lattice: PixelLattice, values):
 
 
 def response_centroid(lattice: PixelLattice, values):
-    """Where each pixel looks.
-    
-    Parameters
-    ----------
-    lattice : PixelLattice
-        Supplies the node spacing and each window's corner.
-    values : array, shape (..., n_pixels, height, width)
-        Pixel response values.
+    """Where each pixel looks: the first moment of its response.
 
-    Returns
-    -------
-    jax.Array, shape ``values.shape[:-2] + (2,)``
-        Field offset per pixel as ``[lon, lat]``, in radians.
+    ``values`` is ``(..., n_pixels, height, width)``; the result is
+    ``values.shape[:-2] + (2,)``, a field offset ``[lon, lat]`` in radians.
     """
     height, width = lattice.grid_shape
     if values.shape[-2:] != (height, width):
@@ -324,29 +277,11 @@ def response_centroid(lattice: PixelLattice, values):
 
 
 def interpolate_regular_grid(x, y, x0, x_step, nx, y0, y_step, ny, data):
-    """Bilinear interpolation on a regular 2-D grid with clamped boundaries.
+    """Bilinear interpolation on a regular 2-D grid, clamped at the edges.
 
-    Interpolates ``data[ix, iy, ...]`` at fractional position ``(x, y)``
-    given a regular grid defined by origin, step, and count along each axis.
-    Values outside the grid are clamped to the nearest edge.
-
-    Parameters
-    ----------
-    x, y : scalar jax arrays
-        Query coordinates.
-    x0, y0 : float
-        Grid origin (first coordinate value) along each axis.
-    x_step, y_step : float
-        Grid spacing along each axis.
-    nx, ny : int
-        Number of grid points along each axis.
-    data : jax.Array
-        Array with leading dims ``(nx, ny, ...)``.
-
-    Returns
-    -------
-    jax.Array
-        Interpolated value with shape ``data.shape[2:]``.
+    Samples ``data``, whose leading dims are ``(nx, ny, ...)``, at the
+    query point ``(x, y)``; the grid is given by its origin, step and count
+    along each axis.  Returns shape ``data.shape[2:]``.
     """
     # Fractional indices, clamped to valid range
     fx_raw = jnp.clip((x - x0) / x_step, 0.0, nx - 1.0)
@@ -368,39 +303,31 @@ def interpolate_regular_grid(x, y, x0, x_step, nx, y0, y_step, ny, data):
     )
 
 
-def interpolate_pixel_rates(lat_grid, lon_grid, values, coords):
+def interpolate_pixel_rates(grid, values, coords):
     """Bilinear interpolation of the FOV evaluation grid at pixel centres.
-    Parameters
-    ----------
-    lat_grid, lon_grid : jax.Array
-        Node coordinates of the evaluation grid along the row and column
-        axis respectively, in radians.
-    values : jax.Array, shape (n_lat, n_lon)
-        Gridded values to sample.
-    coords : jax.Array, shape (n_pixels, 2)
-        Pixel centres as ``[lon, lat]``, in radians.
 
-    Returns
-    -------
-    jax.Array, shape (n_pixels,)
-        Interpolated value per pixel; zero outside the grid.
+    ``values`` is ``(n_lon, n_lat)``, lon-major like every grid in nyx, and
+    ``coords`` ``(n_pixels, 2)`` as ``[lon, lat]`` in radians.  ``grid``
+    holds the ``(n,)`` node coordinates: the grid is square and both axes
+    share them, so there is nothing to put in the wrong order.  Returns one
+    value per pixel, zero outside the grid.
     """
-    height, width = values.shape
-    lat_start, lat_step = lat_grid[0], lat_grid[1] - lat_grid[0]
-    lon_start, lon_step = lon_grid[0], lon_grid[1] - lon_grid[0]
+    n_lon, n_lat = values.shape
+    start, step = grid[0], grid[1] - grid[0]
 
-    lat_coords = (coords[:, 1] - lat_start) / lat_step
-    lon_coords = (coords[:, 0] - lon_start) / lon_step
+    # Axis 0 is longitude, so it takes column 0 of the coordinate pair.
+    lon_coords = (coords[:, 0] - start) / step
+    lat_coords = (coords[:, 1] - start) / step
 
     valid_mask = (
-        (lat_coords >= 0)
-        & (lat_coords <= height - 1)
-        & (lon_coords >= 0)
-        & (lon_coords <= width - 1)
+        (lon_coords >= 0)
+        & (lon_coords <= n_lon - 1)
+        & (lat_coords >= 0)
+        & (lat_coords <= n_lat - 1)
     )
 
     # Hat weights: max(0, 1 - |c - i|)
-    w_lat = jnp.maximum(1.0 - jnp.abs(lat_coords[:, None] - jnp.arange(height)), 0.0)
-    w_lon = jnp.maximum(1.0 - jnp.abs(lon_coords[:, None] - jnp.arange(width)), 0.0)
-    interpolated = jnp.sum((w_lat @ values) * w_lon, axis=1)
+    w_lon = jnp.maximum(1.0 - jnp.abs(lon_coords[:, None] - jnp.arange(n_lon)), 0.0)
+    w_lat = jnp.maximum(1.0 - jnp.abs(lat_coords[:, None] - jnp.arange(n_lat)), 0.0)
+    interpolated = jnp.sum((w_lon @ values) * w_lat, axis=1)
     return jnp.where(valid_mask, interpolated, 0.0)

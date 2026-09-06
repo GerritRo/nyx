@@ -70,7 +70,7 @@ def tau_rayleigh(wavelengths_nm, height_km, pressure_hpa=None, scale_height_km=8
     height_km : array or float
         Observer height above sea level, in km.
     pressure_hpa : float or None
-        Station pressure. 
+        Station pressure.
     scale_height_km : float
         Scale height of the barometric fallback ``exp(-height / H)``.
     """

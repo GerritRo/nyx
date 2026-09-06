@@ -37,6 +37,17 @@ def _as_lattice(grid, values) -> PixelLattice:
 
 class _BaseApertureInstrument(InstrumentModel):
     """An instrument whose pixels have a centre, a throughput weight and a bandpass.
+
+    Every subclass is trainable in ``efficiency``, ``pixel_efficiency``,
+    ``shift`` and ``rotation``, the last two per observation.
+
+    Notes
+    -----
+    The forward model uses ``efficiency * pixel_efficiency[i]`` for each
+    pixel, so the absolute scale of ``pixel_efficiency`` is degenerate
+    with ``efficiency``.  Freeze one of them before fitting (e.g.
+    ``model = nyx.core.parameter.freeze(model, 'efficiency')``, or freeze
+    a single reference pixel) to obtain a unique MLE and finite errors.
     """
 
     efficiency: eqx.AbstractVar[Parameter]
@@ -48,9 +59,23 @@ class _BaseApertureInstrument(InstrumentModel):
     _eval_grid: eqx.AbstractVar[jax.Array]
     _horizon_theta: eqx.AbstractVar[float]
 
+    def _init_common(self, geo, bandpass, n_pix):
+        """Assign the parameters and frozen geometry every subclass shares."""
+        self.efficiency = Parameter.from_value(1.0, scale=1.0)
+        self.pixel_efficiency = Parameter.from_value(jnp.ones(n_pix), scale=1.0)
+        self.shift = Parameter.from_value(jnp.zeros(2), scale=1e-3, per_obs=True)
+        self.rotation = Parameter.from_value(0.0, scale=1e-2, per_obs=True)
+
+        wvls = np.asarray(geo.wvls)
+        self._bandpass_func = bandpass
+        self.bandpass_values = jnp.asarray(bandpass(wvls * u.nm) * np.asarray(bin_widths(geo.wvls)))
+        self._eval_grid = jnp.asarray(np.linspace(-geo.fov, geo.fov, geo.ngrid))
+        self._horizon_theta = float(np.pi / 2 - np.min(geo.lat))
+        self._geo_signature = geo.signature
+
     @property
     def bandpass(self):
-        """Spectral transmission curve (no efficiency). Shape [n_wvl]."""
+        """Spectral transmission curve, without efficiency. Shape [n_wvl]."""
         return self.bandpass_values
 
     @property
@@ -59,15 +84,9 @@ class _BaseApertureInstrument(InstrumentModel):
         raise NotImplementedError
 
     def _correction_matrix(self):
-        """3x3 correction matrix mapping the nominal offset frame to the
-        detector frame.
-
-        Returns
-        -------
-        dR : jax.Array, shape (3, 3)
-        """
+        """Rotation (3, 3) taking the nominal offset frame to the detector frame."""
         dlon, dlat = self.shift.value[0], self.shift.value[1]
-        rot = self.rotation.value[0]
+        rot = self.rotation.value
 
         cl, sl = jnp.cos(dlon), jnp.sin(dlon)
         ca, sa = jnp.cos(dlat), jnp.sin(dlat)
@@ -83,29 +102,14 @@ class _BaseApertureInstrument(InstrumentModel):
         return Rx @ Ry @ Rz
 
     def corrected_pm(self, pm):
-        """Pointing matrix corrected for detector shift and rotation.
-
-        Parameters
-        ----------
-        pm : jax.Array, shape (3, 3)
-            Nominal pointing matrix from observation geometry.
-
-        Returns
-        -------
-        jax.Array, shape (3, 3)
-        """
+        """Nominal pointing matrix (3, 3), corrected for shift and rotation."""
         return self._correction_matrix() @ pm
 
     def _nominal_centers(self):
-        """Pixel centers mapped from detector frame to nominal offset frame.
+        """Pixel centres (n_pix, 2) mapped back to the nominal offset frame.
 
-        Applies the inverse correction (``dR.T``) so that pixel positions
-        can be looked up on the FOV scattering grid, which is defined in
-        the nominal offset frame.
-
-        Returns
-        -------
-        jax.Array, shape (n_pix, 2)
+        The FOV scattering grid lives in that frame, so looking pixels up
+        on it means undoing the detector correction first.
         """
         dR_inv = self._correction_matrix().T  # orthogonal inverse
         # Lattice axis 0 is longitude
@@ -119,47 +123,19 @@ class _BaseApertureInstrument(InstrumentModel):
         return jnp.stack([nom_lon, nom_lat], axis=-1)
 
     def project_scattered(self, eval_grid_values):
-        """Project scattering eval grid onto pixels.
+        """Sample the FOV scattering grid (n_lon, n_lat) at each pixel.
 
-        Maps pixel centres from the detector frame back to the nominal
-        offset frame (undoing shift + rotation) before sampling the
-        scattering grid.
-
-        Parameters
-        ----------
-        eval_grid_values : shape [n_lat, n_lon]
-            The FOV evaluation grid, laid out row-by-latitude and
-            column-by-longitude; see :func:`interpolate_pixel_rates`,
-            which is where that pairing is enforced.
-
-        Returns
-        -------
-        rates : shape [n_pixels]
+        Returns rates [n_pixels].
         """
         centers_nom = self._nominal_centers()  # [lon, lat] per pixel
-        rates = interpolate_pixel_rates(
-            self._eval_grid,
-            self._eval_grid,
-            eval_grid_values,
-            centers_nom,
-        )
+        rates = interpolate_pixel_rates(self._eval_grid, eval_grid_values, centers_nom)
         return rates * self.weight * self.pixel_efficiency.value
 
     def project_diffuse(self, hp_values, pm):
-        """Project HEALPix values onto pixels.
+        """Sample a band-integrated HEALPix sky [n_hp] at each pixel.
 
-        Computes corrected AltAz for each pixel centre via the corrected
-        pointing matrix, then samples the HEALPix sky map.
-
-        Parameters
-        ----------
-        hp_values : shape [n_hp] (already band-integrated)
-        pm : jax.Array, shape (3, 3)
-            Nominal pointing matrix.
-
-        Returns
-        -------
-        rates : shape [n_pixels]
+        ``pm`` is the nominal pointing matrix (3, 3).  Returns rates
+        [n_pixels].
         """
         R = self.corrected_pm(pm)
         # Lattice axis 0 is longitude
@@ -171,29 +147,14 @@ class _BaseApertureInstrument(InstrumentModel):
         return rates * self.weight * self.pixel_efficiency.value
 
     def save(self, filepath, wavelength_range=(200, 1000), wavelength_samples=1000, metadata=None):
-        """Save instrument to HDF5 file.
-
-        Delegates to :func:`nyx.instrument.io.save_instrument`.
-        """
+        """Write to HDF5; see :func:`nyx.instrument.io.save_instrument`."""
         from nyx.instrument.io import save_instrument
 
         save_instrument(self, filepath, wavelength_range, wavelength_samples, metadata)
 
     @classmethod
     def load(cls, filepath, geo):
-        """Load instrument from HDF5 file.
-
-        Delegates to :func:`nyx.instrument.io.load_instrument`.
-
-        Parameters
-        ----------
-        filepath : str or Path
-        geo : Geometry
-
-        Returns
-        -------
-        instrument instance
-        """
+        """Read from HDF5; see :func:`nyx.instrument.io.load_instrument`."""
         from nyx.instrument.io import load_instrument
 
         return load_instrument(filepath, geo)
@@ -238,10 +199,6 @@ class _BaseApertureInstrument(InstrumentModel):
             Print scan progress to stderr.
         **scan_kwargs
             Anything else :func:`iactrace.analysis.effective_aperture` accepts.
-
-        Returns
-        -------
-        _BaseApertureInstrument
 
         Examples
         --------
@@ -298,19 +255,10 @@ class _BaseApertureInstrument(InstrumentModel):
 
     @classmethod
     def from_iactrace_table(cls, geo, table):
-        """Build an instrument from an already-scanned effective-aperture table.
+        """Build an instrument from an already-scanned effective-aperture table::
 
-            table = iactrace.analysis.effective_aperture(telescope, camera)
-            inst = EffectiveApertureInstrument.from_iactrace_table(geo, table)
-
-        Parameters
-        ----------
-        geo : Geometry
-        table : iactrace.analysis.EffectiveApertureTable
-
-        Returns
-        -------
-        _BaseApertureInstrument
+        table = iactrace.analysis.effective_aperture(telescope, camera)
+        inst = EffectiveApertureInstrument.from_iactrace_table(geo, table)
         """
         from nyx.instrument._iactrace import build_from_table
 
@@ -342,20 +290,12 @@ class _LatticeApertureInstrument(_BaseApertureInstrument):
         return self.lattice.grid
 
     def project_catalog(self, source_coords, source_fluxes):
-        """Project point sources onto pixels.
+        """Project point sources onto pixels, returning rates [n_pixels].
 
-        Source coordinates are already in the detector frame (transformed
-        via the corrected pointing matrix in the render pipeline).
-
-        Parameters
-        ----------
-        source_coords : shape [n_sources, 2]
-            Offset-frame coords in the detector frame.
-        source_fluxes : shape [n_sources] (already band-integrated + extincted)
-
-        Returns
-        -------
-        rates : shape [n_pixels]
+        ``source_coords`` (n_sources, 2) are offset-frame coordinates
+        already in the detector frame, and ``source_fluxes`` (n_sources,)
+        already band-integrated and extincted -- the render pipeline does
+        both before calling this.
         """
         weights = project_lattice(
             self.lattice,
@@ -370,22 +310,11 @@ class _LatticeApertureInstrument(_BaseApertureInstrument):
 
 
 class EffectiveApertureInstrument(_LatticeApertureInstrument):
-    """Effective-aperture instrument.
+    """Effective-aperture instrument with a fixed response table.
 
-    Trainable parameters: efficiency, pixel_efficiency, shift, rotation.
     Frozen data: pixel geometry, bandpass, eval grid.
-
-    Notes
-    -----
-    The forward model uses ``efficiency * pixel_efficiency[i]`` for each
-    pixel, so the absolute scale of ``pixel_efficiency`` is degenerate
-    with ``efficiency``.  Freeze one of them before fitting (e.g.
-    ``model = nyx.core.parameter.freeze(model, 'efficiency')``, or freeze
-    a single reference pixel) to obtain a unique MLE and finite errors.
     """
 
-    # Trainable parameters.
-    # shift and rotation carry ``per_obs=True``.
     efficiency: Parameter
     pixel_efficiency: Parameter
     shift: Parameter
@@ -399,42 +328,31 @@ class EffectiveApertureInstrument(_LatticeApertureInstrument):
     bandpass_values: jax.Array  # [n_wvl]
     _eval_grid: jax.Array  # (ngrid,)
 
-    # Fields with defaults last (eqx.field() or explicit default)
+    # Static fields last: they carry a default, so nothing may follow them.
     _bandpass_func: Callable = eqx.field(static=True)
     _horizon_theta: float = eqx.field(static=True)
+    _geo_signature: tuple = eqx.field(static=True)
 
     def __init__(self, geo, bandpass, grid, values):
         """
         Parameters
         ----------
         geo : Geometry
-            Resolution configuration (provides wavelengths, FOV grid).
         bandpass : callable
-            Function mapping wavelength Quantity -> transmission.
-        grid : array, shape (n_pixels, 2, grid_dim), or PixelLattice
+            Maps a wavelength Quantity to transmission.
+        grid : array (n_pixels, 2, grid_dim) or PixelLattice
             Pixel sub-grid coordinates in radians, from which the shared
             response lattice is recovered; or that lattice directly.
-        values : array, shape (n_pixels, grid_dim, grid_dim)
-            Pixel response values at sub-grid points.
+        values : array (n_pixels, grid_dim, grid_dim)
+            Pixel response at the sub-grid points.
         """
         values = np.asarray(values)
-
-        self.efficiency = Parameter.from_value(1.0, scale=1.0)
-        self.pixel_efficiency = Parameter.from_value(jnp.ones(values.shape[0]), scale=1.0)
-        self.shift = Parameter.from_value(jnp.zeros(2), scale=1e-3, per_obs=True)
-        self.rotation = Parameter.from_value(jnp.array([0.0]), scale=1e-2, per_obs=True)
+        self._init_common(geo, bandpass, n_pix=values.shape[0])
 
         self.lattice = _as_lattice(grid, values)
         self._pixel_values = jnp.asarray(values)
         self._weight = integrate_response(self.lattice, self._pixel_values)
         self._centers = response_centroid(self.lattice, self._pixel_values)
-        self._bandpass_func = bandpass
-
-        wvls = geo.wvls
-        bp_values = bandpass(np.asarray(wvls) * u.nm) * np.asarray(bin_widths(wvls))
-        self.bandpass_values = jnp.asarray(bp_values)
-        self._eval_grid = jnp.asarray(np.linspace(-geo.fov, geo.fov, geo.ngrid))
-        self._horizon_theta = float(np.pi / 2 - np.min(geo.lat))
 
     @property
     def weight(self):
@@ -459,28 +377,14 @@ class EffectiveApertureInstrument(_LatticeApertureInstrument):
 
 
 class EffectiveApertureMisalignmentInstrument(_LatticeApertureInstrument):
-    """Effective-aperture instrument with mirror misalignment fitting.
+    """Effective-aperture instrument with fittable mirror misalignment.
 
     Stores a 5-D pixel response table parameterised by misalignment
-    ``(sigma_x, sigma_y)``. At render time the table is interpolated
-    bilinearly in sigma-space to obtain the effective ``(npix, Nx, Ny)``
-    response for the current misalignment, after which the standard
-    projection logic applies.
-
-    Trainable parameters: efficiency, pixel_efficiency, shift, rotation,
-    sigma_x, sigma_y.
-
-    Notes
-    -----
-    The forward model uses ``efficiency * pixel_efficiency[i]`` for each
-    pixel, so the absolute scale of ``pixel_efficiency`` is degenerate
-    with ``efficiency``.  Freeze one of them before fitting (e.g.
-    ``model = nyx.core.parameter.freeze(model, 'efficiency')``, or freeze
-    a single reference pixel) to obtain a unique MLE and finite errors.
+    ``(sigma_x, sigma_y)``, both trainable.  At render time the table is
+    interpolated bilinearly in sigma-space to give the effective
+    ``(npix, Nx, Ny)`` response, after which projection is as usual.
     """
 
-    # Trainable parameters.
-    # shift and rotation carry ``per_obs=True``.
     efficiency: Parameter
     pixel_efficiency: Parameter
     shift: Parameter
@@ -498,9 +402,10 @@ class EffectiveApertureMisalignmentInstrument(_LatticeApertureInstrument):
     sigma_x_coords: jax.Array  # [Nsigma_x]
     sigma_y_coords: jax.Array  # [Nsigma_y]
 
-    # Fields with defaults last (eqx.field() or explicit default)
+    # Static fields last: they carry a default, so nothing may follow them.
     _bandpass_func: Callable = eqx.field(static=True)
     _horizon_theta: float = eqx.field(static=True)
+    _geo_signature: tuple = eqx.field(static=True)
     _sx0: float = eqx.field(static=True)
     _sx_step: float = eqx.field(static=True)
     _nsx: int = eqx.field(static=True)
@@ -523,63 +428,39 @@ class EffectiveApertureMisalignmentInstrument(_LatticeApertureInstrument):
         Parameters
         ----------
         geo : Geometry
-            Resolution configuration (provides wavelengths, FOV grid).
         bandpass : callable
-            Function mapping wavelength Quantity -> transmission.
-        grid : array, shape (n_pixels, 2, grid_dim), or PixelLattice
+            Maps a wavelength Quantity to transmission.
+        grid : array (n_pixels, 2, grid_dim) or PixelLattice
             Pixel sub-grid coordinates in radians, from which the shared
             response lattice is recovered; or that lattice directly.
-        all_values : array, shape (Nsigma_x, Nsigma_y, n_pixels, Nx, Ny)
-            Pixel response values for each sigma combination.
-        sigma_x_coords : array, shape (Nsigma_x,)
-            Regularly-spaced sigma_x grid values.
-        sigma_y_coords : array, shape (Nsigma_y,)
-            Regularly-spaced sigma_y grid values.
+        all_values : array (Nsigma_x, Nsigma_y, n_pixels, Nx, Ny)
+            Pixel response for each sigma combination.
+        sigma_x_coords, sigma_y_coords : array
+            Regularly-spaced misalignment grids the table is tabulated on.
         sigma_x_init, sigma_y_init : float
-            Initial misalignment parameter values.
+            Starting misalignment.
         """
         all_values = np.asarray(all_values)
         sigma_x_coords = np.asarray(sigma_x_coords, dtype=np.float64)
         sigma_y_coords = np.asarray(sigma_y_coords, dtype=np.float64)
+        self._init_common(geo, bandpass, n_pix=all_values.shape[2])
 
-        # Trainable parameters
-        self.efficiency = Parameter.from_value(1.0, scale=1.0)
-        self.pixel_efficiency = Parameter.from_value(jnp.ones(all_values.shape[2]), scale=1.0)
-        self.shift = Parameter.from_value(jnp.zeros(2), scale=1e-3, per_obs=True)
-        self.rotation = Parameter.from_value(jnp.array([0.0]), scale=1e-2, per_obs=True)
         self.sigma_x = Parameter.from_value(float(sigma_x_init), scale=1.0)
         self.sigma_y = Parameter.from_value(float(sigma_y_init), scale=1.0)
 
-        # Frozen pixel geometry
         self.lattice = _as_lattice(grid, all_values)
-
-        # 5-D response table
         self.all_pixel_values = jnp.asarray(all_values)
         self.sigma_x_coords = jnp.asarray(sigma_x_coords)
         self.sigma_y_coords = jnp.asarray(sigma_y_coords)
 
-        # Sigma grid metadata (static)
-        nsx = len(sigma_x_coords)
-        nsy = len(sigma_y_coords)
-        self._sx0 = float(sigma_x_coords[0])
-        self._sx_step = float(sigma_x_coords[1] - sigma_x_coords[0]) if nsx > 1 else 1.0
-        self._nsx = nsx
-        self._sy0 = float(sigma_y_coords[0])
-        self._sy_step = float(sigma_y_coords[1] - sigma_y_coords[0]) if nsy > 1 else 1.0
-        self._nsy = nsy
-
-        # Bandpass
-        self._bandpass_func = bandpass
-        wvls = geo.wvls
-        bp_values = bandpass(np.asarray(wvls) * u.nm) * np.asarray(bin_widths(wvls))
-        self.bandpass_values = jnp.asarray(bp_values)
-
-        # FOV eval grid
-        self._eval_grid = jnp.asarray(np.linspace(-geo.fov, geo.fov, geo.ngrid))
-        self._horizon_theta = float(np.pi / 2 - np.min(geo.lat))
+        # Sigma grid metadata, static so interpolation indices are traceable.
+        self._nsx, self._nsy = len(sigma_x_coords), len(sigma_y_coords)
+        self._sx0, self._sy0 = float(sigma_x_coords[0]), float(sigma_y_coords[0])
+        self._sx_step = float(sigma_x_coords[1] - sigma_x_coords[0]) if self._nsx > 1 else 1.0
+        self._sy_step = float(sigma_y_coords[1] - sigma_y_coords[0]) if self._nsy > 1 else 1.0
 
     def _interp(self, data):
-        """Interpolate data array at current (sigma_x, sigma_y)."""
+        """Interpolate ``data`` at the current (sigma_x, sigma_y)."""
         return interpolate_regular_grid(
             self.sigma_x.value,
             self.sigma_y.value,

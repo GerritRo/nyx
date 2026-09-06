@@ -26,7 +26,7 @@ class SkyGeometry(eqx.Module):
     altaz_coord: jnp.ndarray  # (nsky, 2)
     icrs_coord: jnp.ndarray  # (nsky, 2)
     sref_coord: jnp.ndarray  # (nsky, 2)
-    fov_altaz_grid: jnp.ndarray  # (ngrid, ngrid, 2)
+    fov_altaz_grid: jnp.ndarray  # (n_lon, n_lat, 2) lon-major; pairs are (az, alt)
     height_km: jnp.ndarray  # scalar - observer height above sea level [km]
     hemisphere_mask: jnp.ndarray  # (npix,) bool - upper hemisphere pixels
 
@@ -37,7 +37,7 @@ class RenderGeometry(eqx.Module):
 
     sky: SkyGeometry
     pointing_matrix: jnp.ndarray  # (3, 3)
-    _per_obs: tuple[str, ...] = eqx.field(static=True, default=("sky", "pointing_matrix"))
+    per_obs: tuple[str, ...] = eqx.field(static=True, default=("sky", "pointing_matrix"))
 
 
 def _extract_icrs(skycoord: SkyCoord) -> tuple[np.ndarray, np.ndarray]:
@@ -109,6 +109,9 @@ class Observation:
 
         self.location = location
         self._altaz_kwargs = kwargs
+        # Read back by nyx.core.io._dump_observation so a saved fit bundle
+        # round-trips the pointing convention it was built with.
+        self._refract_pointing = refract_pointing
 
         # Build per-observation AltAz frames and pointing geometry
         self.altaz_frames = [AltAz(location=self.location, obstime=t, **kwargs) for t in times]
@@ -127,7 +130,21 @@ class Observation:
         # Frame registry and coordinate cache
         self._frames = dict(_BUILTIN_FRAMES)
         self._sky_cache: dict[str, list[SkyCoord]] = {}
-        self._pixel_cache: dict[str, Any] = {}
+
+    def __repr__(self) -> str:
+        icrs = self.target_icrs.icrs
+        span = (
+            ""
+            if self.nobs < 2
+            else f" over {(self.times[-1] - self.times[0]).to_value('hour'):.3g} h"
+        )
+        return (
+            f"Observation({self.nobs} time{'s' if self.nobs != 1 else ''}"
+            f" from {self.times[0].utc.isot}{span}, "
+            f"target ra={icrs.ra.deg:.4f} dec={icrs.dec.deg:.4f} deg, "
+            f"lon={self.location.lon.deg:.4f} lat={self.location.lat.deg:.4f} deg "
+            f"h={self.height_km:.3g} km, {self.geom!r})"
+        )
 
     @staticmethod
     def _build_pointing(
@@ -199,13 +216,6 @@ class Observation:
         coords = self.get_sky_coords(key)
         _, extractor = self._frames[key]
         lon, lat = extractor(coords[obs_idx])
-        return jnp.stack([jnp.array(lon), jnp.array(lat)], axis=-1)
-
-    def _pixel_coords_jax(self, key: str, result_altaz: SkyCoord) -> jax.Array:
-        """Get pixel coords as a jax array (npix, 2) for a single observation."""
-        frame, extractor = self._frames[key]
-        result = result_altaz.transform_to(frame)
-        lon, lat = extractor(result)
         return jnp.stack([jnp.array(lon), jnp.array(lat)], axis=-1)
 
     def get_render_geometry(self) -> list[RenderGeometry]:

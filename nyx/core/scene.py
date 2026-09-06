@@ -1,16 +1,25 @@
 from __future__ import annotations
 
+import dataclasses
 import os
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 from typing import Any
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 
-from nyx.core.filters import _navigate, per_obs_filter, select_obs
+from nyx.core.filters import per_obs_filter, select_obs
+from nyx.core.geometry import check_shared_geometry
 from nyx.core.observation import Observation, RenderGeometry
-from nyx.core.parameter import _ParametersTable, _wrap_like, parameters_table
+from nyx.core.parameter import (
+    _iter_parameters,
+    _ParametersTable,
+    n_trainable,
+    parameters_table,
+    set_parameters,
+)
 from nyx.core.protocols import (
     AtmosphereModel,
     InstrumentModel,
@@ -45,6 +54,8 @@ class _RenderFrame(eqx.Module):
     instrument: InstrumentModel
     render_geometry: RenderGeometry
     nobs: int = eqx.field(static=True)
+    # Static, so the names never reach vmap as leaves.
+    source_names: tuple[str, ...] = eqx.field(static=True, default=())
 
 
 class Scene(eqx.Module):
@@ -115,11 +126,32 @@ class Scene(eqx.Module):
     _obs_bundles: dict[str, _ObsBundle]
 
     def __getattr__(self, name: str) -> Any:
+        # Never route dunder lookups (``__deepcopy__``, ``__getstate__``, ...)
+        # through the name dicts: during unflattening they may not exist yet,
+        # and the lookup would recurse.
+        if name.startswith("_"):
+            raise AttributeError(name)
         for d in (self.sources, self.instruments):
             if name in d:
                 return d[name]
         raise AttributeError(
             f"'{type(self).__name__}' has no attribute, source, or instrument named '{name}'"
+        )
+
+    def __repr__(self) -> str:
+        """What the scene is, not what it contains.
+
+        See ``parameters_table()`` for the parameters, ``profile_scene()``
+        for the arrays.
+        """
+        counts = ", ".join(f"{name}({n} obs)" for name, n in self.nobs.items())
+        n_free = n_trainable(self)
+        total = sum(int(np.size(np.asarray(p.factor))) for _, p in _iter_parameters(self))
+        return (
+            f"Scene(instruments: {counts or '(none)'}; "
+            f"sources: {', '.join(self.sources) or '(none)'}; "
+            f"atmosphere: {type(self.atmosphere).__name__}; "
+            f"{n_free} of {total} parameter values free)"
         )
 
     @property
@@ -184,6 +216,8 @@ class Scene(eqx.Module):
                 f"instrument keys {set(instruments)} do not match obs keys {set(obs_list)}"
             )
 
+        check_shared_geometry(obs_list, atmosphere, instruments, sources)
+
         # Extract shared source models
         source_names = list(sources.keys())
         scene_sources = {name: src.model() for name, src in sources.items()}
@@ -213,7 +247,7 @@ class Scene(eqx.Module):
         )
 
     def _render_frame(self, inst_name: str) -> _RenderFrame:
-        """Combine the shared sky with one instrument's observation data.)."""
+        """Combine the shared sky with one instrument's observation data."""
         bundle = self._obs_bundles[inst_name]
         od = bundle.obs_data
         return _RenderFrame(
@@ -222,37 +256,45 @@ class Scene(eqx.Module):
             instrument=self.instruments[inst_name],
             render_geometry=bundle.render_geometry,
             nobs=bundle.nobs,
+            source_names=tuple(od),
         )
 
-    def render(self) -> dict[str, jax.Array]:
+    def render(self, *, per_source: bool = False) -> dict[str, Any]:
         """Render all observations to pixel rates.
 
         Shared atmosphere and source models are combined with
         per-instrument data at render time.
 
+        Parameters
+        ----------
+        per_source : bool
+            Split each instrument's rates by emitter, to find out what is
+            lighting a pixel::
+
+                parts = scene.render(per_source=True)['CT1']
+
+            The parts sum to the whole to float32 rounding.  The
+            atmosphere kernel is built once either way.
+
         Returns
         -------
         dict of {name: jax.Array}, each shape (nobs_i, n_pixels_i)
-            One array per instrument, keyed by instrument name.
+            One array per instrument, keyed by instrument name; or, with
+            *per_source*, ``{instrument: {source: array}}``.
         """
+        from nyx.core.pipeline import contributions as _contributions
         from nyx.core.pipeline import render as _render_single
 
-        results = {}
-        for inst_name, bundle in self._obs_bundles.items():
-            od = bundle.obs_data
-            frame = _RenderFrame(
-                atmosphere=self.atmosphere,
-                sources=[(self.sources[n], od[n]) for n in od],
-                instrument=self.instruments[inst_name],
-                render_geometry=bundle.render_geometry,
-                nobs=bundle.nobs,
-            )
+        single = _contributions if per_source else _render_single
+        results: dict[str, Any] = {}
+        for inst_name in self._obs_bundles:
+            frame = self._render_frame(inst_name)
             filt = per_obs_filter(frame)
             per_obs, shared = eqx.partition(frame, filt)
 
-            def _single(per_obs_i: Any, shared: Any = shared) -> jax.Array:
+            def _single(per_obs_i: Any, shared: Any = shared, kernel: Any = single) -> Any:
                 f = eqx.combine(shared, per_obs_i)
-                return _render_single(f)
+                return kernel(f)
 
             results[inst_name] = jax.vmap(_single)(per_obs)
         return results
@@ -275,23 +317,8 @@ class Scene(eqx.Module):
         return self.set_params({path: value})
 
     def set_params(self, params: dict[str, Any]) -> Scene:
-        """Set multiple fields from a ``{dotted_path: value}`` dict.
-
-        Raw values are auto-wrapped into :class:`Parameter` instances when
-        the target is a Parameter (see :meth:`set`).
-        """
-        if not params:
-            return self
-        resolved = [tuple(self._resolve_path(k.split("."))) for k in params]
-        wrapped = tuple(
-            _wrap_like(_navigate(self, r), v)
-            for r, v in zip(resolved, params.values(), strict=True)
-        )
-        return eqx.tree_at(
-            lambda s: tuple(_navigate(s, r) for r in resolved),
-            self,
-            wrapped,
-        )
+        """Set parameters from a ``{name: value}`` dict; see :meth:`set`."""
+        return set_parameters(self, params)
 
     def sky_view(
         self,
@@ -390,7 +417,7 @@ class Scene(eqx.Module):
         Scene
             A new scene with the light curve applied; the original is unchanged.
         """
-        inst = self._resolve_lightcurve_instrument(instrument)
+        inst = self._resolve_instrument(instrument)
         src = self._resolve_lightcurve_source(source, inst)
         bundle = self._obs_bundles[inst]
         od = bundle.obs_data[src]
@@ -401,35 +428,15 @@ class Scene(eqx.Module):
         weights = set_source_weight(
             od.source_weights, index, curve, nobs=nobs, n_src=n_src, n_wvl=n_wvl
         )
-        new_od = SourceObsData(
-            diffuse_conditions=od.diffuse_conditions,
-            diffuse_norm=od.diffuse_norm,
-            source_conditions=od.source_conditions,
-            source_coords=od.source_coords,
+        # ``replace`` rather than a field-by-field rebuild: a new
+        # SourceObsData field would otherwise be silently dropped here.
+        new_od = dataclasses.replace(
+            od,
             source_weights=weights,
-            direct=od.direct,
-            inscatter=od.inscatter,
-            _per_obs=tuple(dict.fromkeys(od._per_obs + ("source_weights",))),
+            per_obs=tuple(dict.fromkeys(od.per_obs + ("source_weights",))),
         )
-        new_bundle = _ObsBundle(
-            obs_data={**bundle.obs_data, src: new_od},
-            render_geometry=bundle.render_geometry,
-            nobs=bundle.nobs,
-        )
+        new_bundle = dataclasses.replace(bundle, obs_data={**bundle.obs_data, src: new_od})
         return eqx.tree_at(lambda s: s._obs_bundles[inst], self, new_bundle)
-
-    def _resolve_lightcurve_instrument(self, instrument: str | None) -> str:
-        if instrument is not None:
-            if instrument not in self._obs_bundles:
-                raise KeyError(
-                    f"{instrument!r} is not an instrument; choices: {list(self._obs_bundles)}"
-                )
-            return instrument
-        if len(self._obs_bundles) == 1:
-            return next(iter(self._obs_bundles))
-        raise ValueError(
-            f"scene has multiple instruments {list(self._obs_bundles)}; pass instrument=..."
-        )
 
     def _resolve_instrument(self, instrument: str | None) -> str:
         """Validate an instrument name, or fall back to the only one."""
@@ -496,28 +503,6 @@ class Scene(eqx.Module):
         from nyx.core.io import save_fit
 
         save_fit(path, self, observations)
-
-    def _resolve_path(self, parts: Sequence[str]) -> list[str | int]:
-        """Resolve user-facing path segments to internal pytree path.
-
-        Maps instrument/source names to their internal locations::
-
-            ('CT1', 'shift')  -> ('instruments', 'CT1', 'shift')
-            ('airglow', ...)  -> ('sources', 'airglow', ...)
-            ('atmosphere', ..) -> ('atmosphere', ..)
-        """
-        first, *rest = parts
-        rest_parts: list[str | int] = [int(p) if p.isdigit() else p for p in rest]
-        if first in ("atmosphere", "sources", "instruments", "_obs_bundles"):
-            return [first] + rest_parts
-        for dict_name in ("sources", "instruments"):
-            if first in getattr(self, dict_name):
-                return [dict_name, first] + rest_parts
-        raise KeyError(
-            f"'{first}' is not a Scene field, source name, or "
-            f"instrument name. Sources: {list(self.sources.keys())}, "
-            f"Instruments: {list(self.instruments.keys())}"
-        )
 
     def __len__(self) -> int:
         """Number of instruments."""

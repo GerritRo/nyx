@@ -53,6 +53,7 @@ class Stars(BaseEmitter):
     ):
         self._wvls = geo.wvls
         self._nside = geo.nside
+        self._geo_signature = geo.signature
         self._sky_map = sky_map
         self._map_nside = hp.npix2nside(sky_map.shape[1])
         self._bright_conditions = bright_conditions
@@ -230,7 +231,7 @@ class Stars(BaseEmitter):
             source_coords=jnp.stack(coords_list),
             source_weights=source_weights,
             direct=False,
-            _per_obs=("diffuse_conditions", "source_coords")
+            per_obs=("diffuse_conditions", "source_coords")
             + (("source_weights",) if source_weights is not None else ()),
         )
 

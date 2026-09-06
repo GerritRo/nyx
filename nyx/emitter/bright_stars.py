@@ -59,6 +59,7 @@ class BrightStars(BaseEmitter):
     ):
         self._wvls = geo.wvls
         self._spectral_model = spectral_model
+        self._geo_signature = geo.signature
         self._coords = coords
         self._photometry = np.asarray(photometry)
 
@@ -102,7 +103,7 @@ class BrightStars(BaseEmitter):
             source_conditions=jnp.stack(conditions_list),
             source_coords=jnp.stack(coords_list),
             inscatter=True,
-            _per_obs=("source_conditions", "source_coords"),
+            per_obs=("source_conditions", "source_coords"),
         )
 
     @classmethod

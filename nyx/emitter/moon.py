@@ -27,6 +27,7 @@ class Moon(BaseEmitter):
     def __init__(self, geo, spectral_model: SpectralModel):
         self._spectral_model = spectral_model
         self._wvls = geo.wvls
+        self._geo_signature = geo.signature
 
     def prepare(self, obs) -> SourceObsData:
         """Query moon position and return per-observation data.
@@ -82,7 +83,7 @@ class Moon(BaseEmitter):
             source_conditions=jnp.stack(conditions_list),
             source_coords=jnp.stack(coords_list),
             inscatter=True,
-            _per_obs=("source_conditions", "source_coords"),
+            per_obs=("source_conditions", "source_coords"),
         )
 
     @classmethod

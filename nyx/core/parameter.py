@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import fnmatch
 from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
@@ -19,7 +20,19 @@ __all__ = [
     "unfreeze_all",
     "parameters_table",
     "dump_params",
+    "n_trainable",
+    "set_parameters",
 ]
+
+
+def _navigate(obj: Any, path: tuple[Any, ...]) -> Any:
+    """Follow a path tuple through a mix of eqx.Modules, dicts, lists, tuples."""
+    for step in path:
+        if isinstance(step, int) or isinstance(obj, dict):
+            obj = obj[step]
+        else:
+            obj = getattr(obj, step)
+    return obj
 
 
 # Parameter transforms
@@ -101,6 +114,21 @@ class Parameter(eqx.Module):
         """
         return self.scale * _TRANSFORMS[self.transform][2](self.factor * self.scale)
 
+    def __repr__(self) -> str:
+        # equinox would show ``factor``, the leaf the optimizer steps in --
+        # for a log-transformed AOD of 0.1 that reads -2.3.
+        value = np.asarray(self.value)
+        shown = (
+            f"{float(value):+.4g}"
+            if value.ndim == 0
+            else (f"[{float(value.min()):+.4g}, {float(value.max()):+.4g}] {value.shape}")
+        )
+        flags = "".join(
+            f", {name}" for name, on in (("per_obs", self.per_obs), ("frozen", self.frozen)) if on
+        )
+        transform = f", {self.transform}" if self.transform else ""
+        return f"Parameter({shown}{transform}{flags})"
+
     def freeze(self) -> Parameter:
         """Return a copy with ``frozen=True``."""
         return dataclasses.replace(self, frozen=True)
@@ -170,7 +198,7 @@ def _is_param(x: Any) -> bool:
 
 
 def autoscale[T](tree: T) -> T:
-    """Rescale every :class:`Parameter` in *tree* using ``scale10``.
+    """Rescale every :class:`Parameter` in *tree* using :func:`_scale10`.
 
     ``value`` is preserved; ``factor`` is brought into the [0.1, 10) band
     (up to sign) for non-zero parameters.  Metadata (``per_obs``,
@@ -221,31 +249,66 @@ def _apply_selector[T](
     return eqx.tree_at(selector, tree, op(target))
 
 
-def freeze[T](tree: T, *selectors: Callable[[Any], Any]) -> T:
-    """Return *tree* with the Parameters addressed by *selectors* frozen.
+def _matching_paths(tree: Any, pattern: str) -> list[tuple[Any, ...]]:
+    """Internal paths of every Parameter whose displayed name matches.
 
-    Each selector is a callable ``tree -> Parameter`` of the form used with
-    :func:`equinox.tree_at`, e.g.::
-
-        scene = freeze(
-            scene,
-            lambda s: s.instruments['CT1'].efficiency,
-            lambda s: s.atmosphere.components['Mie'].hg_asymmetry,
-        )
+    Globbed against the names :func:`parameters_table` prints, so one
+    spelling addresses a parameter everywhere.
     """
+    found = [
+        path for path, _ in _iter_parameters(tree) if fnmatch.fnmatch(_friendly_path(path), pattern)
+    ]
+    if not found:
+        known = sorted(_friendly_path(path) for path, _ in _iter_parameters(tree))
+        raise KeyError(
+            f"{pattern!r} matches no parameter. A pattern that matches nothing is "
+            f"almost always a typo, so it is refused rather than silently ignored. "
+            f"Available: {', '.join(known) if known else '(none)'}"
+        )
+    return found
+
+
+def _apply_at_paths[T](
+    tree: T, paths: list[tuple[Any, ...]], op: Callable[[Parameter], Parameter]
+) -> T:
+    """Apply *op* to the Parameters at *paths*."""
+    return eqx.tree_at(
+        lambda t: tuple(_navigate(t, p) for p in paths),
+        tree,
+        tuple(op(_navigate(tree, p)) for p in paths),
+    )
+
+
+def _apply[T](tree: T, selectors: tuple[Any, ...], op: Callable[[Parameter], Parameter]) -> T:
     for sel in selectors:
-        tree = _apply_selector(tree, sel, Parameter.freeze)
+        if isinstance(sel, str):
+            tree = _apply_at_paths(tree, _matching_paths(tree, sel), op)
+        else:
+            tree = _apply_selector(tree, sel, op)
     return tree
 
 
-def unfreeze[T](tree: T, *selectors: Callable[[Any], Any]) -> T:
+def freeze[T](tree: T, *selectors: str | Callable[[Any], Any]) -> T:
+    """Return *tree* with the Parameters at *selectors* frozen.
+
+    A selector is the parameter's name -- what :func:`parameters_table`
+    prints and :func:`set_parameters` accepts -- optionally globbed::
+
+        scene = freeze(scene, 'CT1.efficiency', '*.pixel_efficiency')
+
+    A pattern matching nothing raises rather than doing nothing quietly.
+    A selector may also be an :func:`equinox.tree_at` callable, which
+    reaches what the names cannot.
+    """
+    return _apply(tree, selectors, Parameter.freeze)
+
+
+def unfreeze[T](tree: T, *selectors: str | Callable[[Any], Any]) -> T:
     """Return *tree* with the Parameters addressed by *selectors* unfrozen.
 
     See :func:`freeze` for the selector convention.
     """
-    for sel in selectors:
-        tree = _apply_selector(tree, sel, Parameter.unfreeze)
-    return tree
+    return _apply(tree, selectors, Parameter.unfreeze)
 
 
 # Auto-wrap helper used by Scene.set / set_params
@@ -266,6 +329,27 @@ def _wrap_like(target: Any, value: Any) -> Any:
             transform=target.transform,
         )
     return value
+
+
+def _wrap_value(path: str, target: Any, value: Any) -> Any:
+    """Wrap *value* for the Parameter at *path*, checking it fits.
+
+    ``eqx.tree_at`` validates tree structure but not leaf shapes, so a
+    wrong-length array would otherwise be accepted and broadcast silently
+    at render time.  A scalar may fill any shape: the one broadcast that
+    cannot be a mistake.
+    """
+    wrapped = _wrap_like(target, value)
+    if _is_param(target) and _is_param(wrapped):
+        want = jnp.shape(target.factor)
+        got = jnp.shape(wrapped.factor)
+        if got != () and got != want:
+            per_obs = " (leading axis is the observation count)" if target.per_obs else ""
+            raise ValueError(
+                f"{path!r} has shape {want}{per_obs}, but the value given has shape "
+                f"{got}; pass a matching array or a scalar to fill it"
+            )
+    return wrapped
 
 
 # Parameters table (pretty-print)
@@ -297,6 +381,21 @@ def _iter_parameters(
     elif isinstance(tree, (list, tuple)):
         for i, child in enumerate(tree):
             yield from _iter_parameters(child, _prefix + (i,))
+
+
+def _friendly_keypath(keypath: Iterable[Any]) -> str:
+    """A jax KeyPath as the same dotted name :func:`_friendly_path` gives.
+
+    jax's own ``keystr`` renders ``sources['airglow'].spectral_model``;
+    everything user-facing in nyx spells that ``airglow.spectral_model``.
+    """
+    parts = []
+    for entry in keypath:
+        for attr in ("name", "key", "idx"):
+            if hasattr(entry, attr):
+                parts.append(getattr(entry, attr))
+                break
+    return _friendly_path(p for p in parts if p != "factor")
 
 
 def _friendly_path(parts: Iterable[Any]) -> str:
@@ -375,6 +474,33 @@ def parameters_table(tree: Any) -> _ParametersTable:
         )
     rows.sort(key=lambda r: r["name"])
     return _ParametersTable(rows)
+
+
+def set_parameters[T](tree: T, params: dict[str, Any]) -> T:
+    """Set Parameters by the names :func:`parameters_table` prints.
+
+    Patterns may glob, writing one value to a group.  A raw value is
+    wrapped preserving the target's ``scale``, ``per_obs``, ``frozen`` and
+    ``transform``, and must match its shape or be a scalar.
+    """
+    for pattern, value in params.items():
+        for path in _matching_paths(tree, pattern):
+            target = _navigate(tree, path)
+            tree = _apply_at_paths(
+                tree, [path], lambda _t, p=pattern, tg=target, v=value: _wrap_value(p, tg, v)
+            )
+    return tree
+
+
+def n_trainable(tree: Any) -> int:
+    """Number of free scalar values: the ``n`` of a reduced chi-squared.
+
+    Read from the same ``frozen`` flags the optimizer uses, so it cannot
+    drift from the parameters actually being fitted.
+    """
+    return sum(
+        int(np.size(np.asarray(p.factor))) for _, p in _iter_parameters(tree) if not p.frozen
+    )
 
 
 def dump_params(tree: Any) -> dict[str, np.ndarray]:

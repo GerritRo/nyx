@@ -1,6 +1,5 @@
-from .camera import camera_image
 from .convergence import FitTrace, record_fit
-from .interpolator import UnitRegularGridInterpolator
+from .focalplane import camera_image
 from .profiler import profile_render, profile_scene
 from .spectra import (
     Bandpass,
@@ -14,16 +13,15 @@ from .spectra import (
 
 __all__ = [
     "Bandpass",
-    "SpectralGrid",
-    "load_solar_flux",
-    "prepare_flux",
-    "create_color_grid",
+    "FitTrace",
     "PicklesTRDSAtlas1998",
     "SolarSpectrumRieke2008",
-    "UnitRegularGridInterpolator",
-    "profile_scene",
-    "profile_render",
-    "FitTrace",
-    "record_fit",
+    "SpectralGrid",
     "camera_image",
+    "create_color_grid",
+    "load_solar_flux",
+    "prepare_flux",
+    "profile_render",
+    "profile_scene",
+    "record_fit",
 ]

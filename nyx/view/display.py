@@ -11,7 +11,7 @@ from nyx.view.response import LUMA, srgb_decode, srgb_encode
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
 
-    from nyx.view.allsky import SkyRender
+    from nyx.view.skyrender import SkyRender
 
 __all__ = ["ToneCurve", "add_noise", "plot_maps", "tonemap"]
 
@@ -251,10 +251,13 @@ def add_noise(
 
 
 def _panels(
-    render: SkyRender, kind: str, sources: list[str] | None
+    render: SkyRender, kind: str, sources: list[str] | str | None
 ) -> tuple[list[tuple[str, np.ndarray]], int]:
     """Panel titles, maps and column count for a plot *kind*."""
-    names = render.sources if sources is None else sources
+    # Normalise here rather than per panel: a bare name is a valid argument
+    # everywhere else in the module, and iterating one as a sequence would
+    # silently ask for a panel per letter.
+    names = render._names(sources)
     scalar = render.scalar
     if kind == "components":
         return [
@@ -335,7 +338,7 @@ def plot_maps(
     render: SkyRender,
     kind: str = "components",
     *,
-    sources: list[str] | None = None,
+    sources: list[str] | str | None = None,
     log: bool = True,
     cmap: str = "magma",
     vmin: float | None = None,
@@ -364,7 +367,7 @@ def plot_maps(
         ``'components'`` shows direct, indirect and total summed over all
         emitters; ``'sources'`` one total panel per emitter; ``'grid'`` a
         full emitter x component matrix.
-    sources : list of str, optional
+    sources : list of str or str, optional
         Restrict to these emitters (default: all).  The colour scale
         follows, which is the way to bring out a faint component that a
         bright one flattens.

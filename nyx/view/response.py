@@ -131,6 +131,16 @@ class SpectralResponse:
         elif len(self.names) != values.shape[1]:
             raise ValueError(f"got {len(self.names)} names for {values.shape[1]} channels")
 
+    def __repr__(self) -> str:
+        # The generated dataclass repr prints every channel value: over a
+        # thousand characters for a 16-point grid, more for a real one.
+        kind = " colorimetric" if self.to_srgb is not None else ""
+        return (
+            f"SpectralResponse({self.n_channels}{kind} channel"
+            f"{'s' if self.n_channels != 1 else ''} {self.names} "
+            f"on {self.n_wvl} wavelengths)"
+        )
+
     @property
     def n_wvl(self) -> int:
         """Length of the wavelength grid the response is defined on."""
@@ -261,8 +271,16 @@ def to_linear_srgb(values: np.ndarray, response: SpectralResponse) -> np.ndarray
     Colours outside the sRGB gamut -- the 557.7 nm airglow line is well
     outside it -- come back from the matrix with a negative component.
     They are desaturated towards white by the smallest amount that clears
-    the gamut, which keeps the hue direction and the luminance rather
-    than clipping a channel to zero and shifting both.
+    the gamut: one constant added to all three channels, which preserves
+    the differences between them and so the hue direction, rather than
+    clipping a channel to zero and shifting the hue with it.
+
+    That constant is added to the luminance too, so an out-of-gamut colour
+    comes back brighter than it went in -- by the size of its most
+    negative component.  The alternative, scaling back towards white about
+    the original luminance, darkens the saturated colours instead.  Either
+    way a colour the display cannot show is being approximated; do not
+    read photometry off the result, read it off the map.
     """
     if response.to_srgb is None:
         rgb = np.asarray(values, dtype=float)

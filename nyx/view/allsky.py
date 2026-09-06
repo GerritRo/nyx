@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import dataclasses
 from typing import TYPE_CHECKING, Any
 
 import equinox as eqx
@@ -12,12 +11,13 @@ import numpy as np
 from nyx.core.coordinates import offset_to_altaz
 from nyx.core.filters import select_obs
 from nyx.core.protocols import AtmosphereModel, SkySource, SourceObsData
-from nyx.view.response import LUMA, SpectralResponse, to_linear_srgb
+from nyx.view.response import SpectralResponse
+from nyx.view.skyrender import PointField, SkyRender
 
 if TYPE_CHECKING:
     from nyx.core.observation import Observation, RenderGeometry, SkyGeometry
 
-__all__ = ["PointField", "SkyRender", "render_prepared", "render_sky"]
+__all__ = ["render_prepared", "render_sky"]
 
 # Peak element count of one chunk of the (targets, source pixels, wavelength)
 # scattering kernel.  32M float32 ~ 128 MB.
@@ -118,8 +118,36 @@ def _coarsen_radiance(radiance: jax.Array, nside_in: int, nside_out: int) -> jax
     return jnp.asarray(means[:, :nsky_out].T * scale)
 
 
+def _bin_sources(
+    coords: jax.Array, spectra: jax.Array, nside: int, n_hemisphere: int
+) -> np.ndarray:
+    """Above-horizon point sources accumulated into hemisphere pixels.
+
+    A source above the horizon but below the lowest ring's centre lands on
+    the equatorial ring, just past the hemisphere block, and is stepped up
+    one ring -- ``4 * nside`` pixels in the equatorial band, keeping its
+    azimuth to within the half-pixel offset between rings.  Clamping the
+    index instead, or the colatitude (which sits on a ring boundary and
+    rounds the wrong way for some azimuths), drops a whole horizon-hugging
+    band of a catalog onto one pixel.  Index arithmetic is exact here
+    where the angle is not.
+
+    *n_hemisphere* is where the equatorial ring begins; sources below the
+    horizon are dropped.
+    """
+    alt = np.asarray(coords[:, 1])
+    keep = alt > 0
+    pix = hp.ang2pix(nside, np.pi / 2 - alt[keep], np.asarray(coords[keep, 0]))
+    # alt > 0 puts a stray source on the equatorial ring and no lower, so
+    # one step is always enough.
+    pix = np.where(pix >= n_hemisphere, pix - 4 * nside, pix)
+    binned = np.zeros((n_hemisphere, int(spectra.shape[1])))
+    np.add.at(binned, np.clip(pix, 0, n_hemisphere - 1), np.asarray(spectra)[keep])
+    return binned
+
+
 def _upsample(values: np.ndarray, nside_in: int, nside_out: int) -> np.ndarray:
-    """Hemisphere values ``(n, 3)`` at *nside_in* to a full map at *nside_out*.
+    """Hemisphere values ``(n, k)`` at *nside_in* to a full map at *nside_out*.
 
     Bilinear, with the colatitude clipped into the coarse hemisphere so
     the fine pixels straddling the horizon interpolate along the lowest
@@ -182,8 +210,8 @@ def _scatter_channels(
     """In-scattered radiance towards every target direction, per channel.
 
     One :meth:`~nyx.core.protocols.AtmosphereModel.evaluate` builds the
-    kernel; every emitter and all three channels are contracted against
-    that one copy.
+    kernel; every emitter and every channel are contracted against that
+    one copy.
     """
     kernel = atmo.evaluate(sky).scattering_map[:, 0]  # (targets, sources, n_wvl)
     return {
@@ -212,238 +240,6 @@ def _scatter_points(
 
 
 # Results
-
-
-@dataclasses.dataclass(frozen=True)
-class PointField:
-    """Point sources of one emitter, as they reach the telescope.
-
-    Attributes
-    ----------
-    az, alt : np.ndarray, shape (n,)
-        Positions in radians.
-    flux : np.ndarray, shape (n, 3)
-        Extincted, band-integrated flux per channel,
-        ``photon / s / m^2`` weighted by the camera response.
-    """
-
-    az: np.ndarray
-    alt: np.ndarray
-    flux: np.ndarray
-
-    def above_horizon(self) -> PointField:
-        """Copy holding only the sources above the horizon."""
-        keep = self.alt > 0
-        return PointField(self.az[keep], self.alt[keep], self.flux[keep])
-
-
-@dataclasses.dataclass(frozen=True)
-class SkyRender:
-    """Per-emitter maps of one sky, ready to be looked at.
-
-    Diffuse maps are full-sphere HEALPix arrays in RING ordering with a
-    trailing channel axis ``(npix, k)``, zero below the horizon, holding
-    radiance in the units of
-    :attr:`~nyx.view.response.SpectralResponse.channels` -- ``photon / s
-    / sr`` through a telescope bandpass, tristimulus per steradian
-    through :meth:`~nyx.view.response.SpectralResponse.cie`.  Point
-    sources are kept apart from the maps, at their exact positions, so a
-    camera can give them a point spread function instead of a HEALPix
-    pixel; :meth:`binned` puts them into pixels when a map view wants
-    them there instead.
-
-    Attributes
-    ----------
-    direct : dict of {source: np.ndarray}
-        Emitter radiance seen through line-of-sight extinction,
-        ``(npix, k)``.
-    indirect : dict of {source: np.ndarray}
-        Light that emitter scatters into each line of sight,
-        ``(npix, k)``.
-    points : dict of {source: PointField}
-        Emitters rendered as individual sources rather than a map.
-    nside : int
-        HEALPix resolution of the maps.
-    response : SpectralResponse
-        The response the maps were integrated against.
-    pointing : tuple of float
-        Telescope ``(az, alt)`` in radians for this observation.
-    label : str
-        What the render was made for, for figure titles.
-    obs_index : int
-        Which observation of *obs* was rendered.
-    scatter_nside, target_nside, point_nside : int
-        Resolutions the scattering integral was evaluated at.
-    """
-
-    direct: dict[str, np.ndarray]
-    indirect: dict[str, np.ndarray]
-    points: dict[str, PointField]
-    nside: int
-    response: SpectralResponse
-    pointing: tuple[float, float] = (0.0, 0.0)
-    label: str = "sky"
-    obs_index: int = 0
-    scatter_nside: int = 0
-    target_nside: int = 0
-    point_nside: int = 0
-
-    @property
-    def unit(self) -> str:
-        """Units of the maps, for axis labels."""
-        return "photon / s / sr" if self.response.n_channels == 1 else "tristimulus / sr"
-
-    @property
-    def sources(self) -> list[str]:
-        """Emitter names, in the order they were rendered."""
-        return list(dict.fromkeys([*self.direct, *self.indirect, *self.points]))
-
-    @property
-    def mask(self) -> np.ndarray:
-        """Boolean above-horizon mask of the map pixels."""
-        theta, _ = hp.pix2ang(self.nside, np.arange(hp.nside2npix(self.nside)))
-        return np.asarray(theta < np.pi / 2)
-
-    @property
-    def horizon_theta(self) -> float:
-        """Colatitude of the lowest populated ring of the map.
-
-        HEALPix puts a ring exactly on the equator, which the hemisphere
-        excludes; interpolating below this angle would blend the sky with
-        that empty ring and darken the horizon.
-        """
-        theta, _ = hp.pix2ang(self.nside, np.arange(hp.nside2npix(self.nside)))
-        return float(theta[theta < np.pi / 2].max())
-
-    def _names(self, sources: list[str] | str | None) -> list[str]:
-        if sources is None:
-            return self.sources
-        names = [sources] if isinstance(sources, str) else list(sources)
-        unknown = [n for n in names if n not in self.sources]
-        if unknown:
-            raise KeyError(f"{unknown} not in this sky; sources: {self.sources}")
-        return names
-
-    def diffuse(
-        self,
-        sources: list[str] | str | None = None,
-        *,
-        direct: bool = True,
-        inscatter: bool = True,
-    ) -> np.ndarray:
-        """Summed diffuse map, ``(npix, 3)``.
-
-        Parameters
-        ----------
-        sources : list of str or str, optional
-            Restrict to these emitters (default: all).
-        direct, inscatter : bool
-            Which of the two paths to include.
-        """
-        total = np.zeros((hp.nside2npix(self.nside), 3))
-        for name in self._names(sources):
-            if direct and name in self.direct:
-                total += self.direct[name]
-            if inscatter and name in self.indirect:
-                total += self.indirect[name]
-        return total
-
-    def point_field(self, sources: list[str] | str | None = None) -> PointField:
-        """Point sources of the requested emitters, concatenated."""
-        fields = [self.points[n] for n in self._names(sources) if n in self.points]
-        if not fields:
-            return PointField(np.zeros(0), np.zeros(0), np.zeros((0, 3)))
-        return PointField(
-            np.concatenate([f.az for f in fields]),
-            np.concatenate([f.alt for f in fields]),
-            np.concatenate([f.flux for f in fields]),
-        )
-
-    def binned(self, sources: list[str] | str | None = None) -> np.ndarray:
-        """Point sources accumulated into map pixels, ``(npix, k)``.
-
-        A map has nowhere to put a point source but a pixel.  The
-        camera path never uses this -- it splats them with a point
-        spread function instead -- but a HEALPix panel has to.
-        """
-        field = self.point_field(sources).above_horizon()
-        return _bin_points(field, self.nside) / hp.nside2pixarea(self.nside)
-
-    def direct_map(
-        self, sources: list[str] | str | None = None, *, points: bool = True
-    ) -> np.ndarray:
-        """Direct (extincted) light, ``(npix, k)``, point sources included."""
-        total = self.diffuse(sources, inscatter=False)
-        return total + self.binned(sources) if points else total
-
-    def indirect_map(self, sources: list[str] | str | None = None) -> np.ndarray:
-        """In-scattered light, ``(npix, k)``."""
-        return self.diffuse(sources, direct=False)
-
-    def total(self, sources: list[str] | str | None = None, *, points: bool = True) -> np.ndarray:
-        """Direct plus in-scattered, ``(npix, k)``."""
-        return self.direct_map(sources, points=points) + self.indirect_map(sources)
-
-    def __getitem__(self, name: str) -> np.ndarray:
-        """Total map of a single emitter."""
-        return self.total([name])
-
-    def masked(self, values: np.ndarray) -> np.ndarray:
-        """Copy of *values* with the below-horizon pixels set to NaN.
-
-        HEALPix plotting routines render NaN as the *bad* colour, which
-        keeps the horizon clean.  The camera path uses zeros instead.
-        """
-        mask = self.mask
-        return np.where(mask.reshape(mask.shape + (1,) * (values.ndim - 1)), values, np.nan)
-
-    def plot(self, kind: str = "components", **kwargs: Any) -> Any:
-        """Draw the hemisphere; see :func:`nyx.view.display.plot_maps`."""
-        from nyx.view.display import plot_maps
-
-        return plot_maps(self, kind, **kwargs)
-
-    def scalar(self, values: np.ndarray) -> np.ndarray:
-        """Reduce channel values ``(..., k)`` to one number per pixel.
-
-        A map panel and a summary table both need a single brightness.
-        A one-channel response already is one; a colorimetric one becomes
-        luminance; anything else is summed.
-        """
-        if self.response.n_channels == 1:
-            return np.asarray(values)[..., 0]
-        if self.response.to_srgb is not None:
-            return to_linear_srgb(values, self.response) @ LUMA
-        return np.asarray(values).sum(axis=-1)
-
-    def summary(self) -> str:
-        """Hemisphere-mean brightness of every component, as a table."""
-        mask = self.mask
-        zero = np.zeros((mask.size, self.response.n_channels))
-
-        def mean(values: np.ndarray) -> float:
-            return float(np.mean(self.scalar(values)[mask]))
-
-        rows = [
-            (
-                name,
-                mean(self.direct.get(name, zero) + self.binned([name])),
-                mean(self.indirect.get(name, zero)),
-            )
-            for name in self.sources
-        ]
-        rows.append(("total", sum(r[1] for r in rows), sum(r[2] for r in rows)))
-
-        header = (
-            f"SkyRender({self.label!r}, obs={self.obs_index}, nside={self.nside}, "
-            f"channels={self.response.n_channels}, scatter_nside={self.scatter_nside}, "
-            f"target_nside={self.target_nside})\n"
-            f"  hemisphere mean [{self.unit}]"
-        )
-        return _table(header, rows)
-
-    def __repr__(self) -> str:
-        return self.summary()
 
 
 def _neighbour_smooth(maps: np.ndarray, nside: int, passes: int) -> np.ndarray:
@@ -497,30 +293,6 @@ def _neighbour_smooth(maps: np.ndarray, nside: int, passes: int) -> np.ndarray:
     return out
 
 
-def _table(header: str, rows: list[tuple[str, float, float]]) -> str:
-    """The direct / indirect / total table every view prints."""
-    width = max([len(r[0]) for r in rows] + [6])
-    lines = [
-        header,
-        f"  {'source':<{width}}  {'direct':>12}  {'indirect':>12}  {'total':>12}",
-        "  " + "-" * (width + 44),
-    ]
-    for name, direct, indirect in rows:
-        lines.append(
-            f"  {name:<{width}}  {direct:>12.4g}  {indirect:>12.4g}  {direct + indirect:>12.4g}"
-        )
-    return "\n".join(lines)
-
-
-def _bin_points(field: PointField, nside: int) -> np.ndarray:
-    """Point fluxes accumulated into HEALPix pixels, ``(npix, 3)``."""
-    binned = np.zeros((hp.nside2npix(nside), 3))
-    if field.az.size:
-        pix = hp.ang2pix(nside, np.pi / 2 - field.alt, field.az)
-        np.add.at(binned, pix, field.flux)
-    return binned
-
-
 # Rendering
 
 
@@ -568,10 +340,11 @@ def render_sky(
         Compute the in-scattered maps.  This is the expensive half of
         the expensive half.
     scatter_nside : int, optional
-        Resolution of the sky being scattered *from* (default: 32, or
-        the map's own resolution if that is coarser).  The scattering
-        kernel integrates the whole sky against a broad phase function,
-        so it does not need the detail the direct image does.
+        Resolution of the sky being scattered *from* (default: 32).  The
+        scattering kernel integrates the whole sky against a broad phase
+        function, so it does not need the detail the direct image does.
+        Capped at the map's own resolution either way: the map is what is
+        being scattered, so there is no finer source to sample.
     target_nside : int, optional
         Resolution of the directions the sky is scattered *into*
         (default: 32).  The scattered field is smooth; it is
@@ -621,7 +394,15 @@ def render_sky(
     into point sources and the background they leave behind.
     """
     if isinstance(emitters, (list, tuple)):
-        emitters = {type(e).__name__: e for e in emitters}
+        names = [type(e).__name__ for e in emitters]
+        clash = {n for n in names if names.count(n) > 1}
+        if clash:
+            raise ValueError(
+                f"auto-naming emitters by class gives duplicate name(s) {sorted(clash)}, "
+                f"which would silently drop all but the last; pass a "
+                f"{{name: emitter}} dict instead"
+            )
+        emitters = dict(zip(names, emitters, strict=True))
     if not -obs.nobs <= obs_index < obs.nobs:
         # JAX clamps out-of-bounds indices instead of raising, so this would
         # otherwise silently return the last observation.
@@ -704,7 +485,10 @@ def render_prepared(
     nsky = int(sky.altaz_coord.shape[0])  # above the horizon only
     map_nside = hp.npix2nside(npix)
     pixel_area = hp.nside2pixarea(map_nside)
-    scatter_nside = _default_nside(scatter_nside, map_nside, 32)
+    # The sky is scattered *from* the map, so there is no more source detail
+    # to be had than the map holds; asking for more would hand the kernel a
+    # different pixel count than the coarse geometry has.
+    scatter_nside = min(_default_nside(scatter_nside, map_nside, 32), map_nside)
     target_nside = _default_nside(target_nside, map_nside, 32)
     point_nside = _default_nside(point_nside, map_nside, 64)
 
@@ -835,13 +619,9 @@ def _render_indirect(
         if int(coords.shape[0]) <= exact_scatter:
             exact[name] = (coords, spectra)
             continue
-        alt = np.asarray(coords[:, 1])
-        keep = alt > 0
-        pix = hp.ang2pix(scatter_nside, np.pi / 2 - alt[keep], np.asarray(coords[keep, 0]))
-        binned = np.zeros((n_coarse, int(spectra.shape[1])))
-        np.add.at(binned, np.minimum(pix, n_coarse - 1), np.asarray(spectra)[keep])
         # _coarsen_radiance carries the same pixel-area convention: the
         # atmosphere multiplies the kernel by the *fine* pixel area.
+        binned = _bin_sources(coords, spectra, scatter_nside, n_coarse)
         sources[name] = jnp.asarray(binned / pixel_area)
 
     maps: dict[str, np.ndarray] = {}

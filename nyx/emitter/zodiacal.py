@@ -120,6 +120,7 @@ class ZodiacalLight(BaseEmitter):
 
         self._wvls = wvls
         self._spectral_model = spectral_model
+        self._geo_signature = geo.signature
 
     def prepare(self, obs) -> SourceObsData:
         """Precompute Leinert weights per HEALPix pixel per observation.
@@ -152,7 +153,7 @@ class ZodiacalLight(BaseEmitter):
 
         return SourceObsData(
             diffuse_conditions=jnp.stack(diffuse_list),  # (nobs, nsky, n_wvl)
-            _per_obs=("diffuse_conditions",),
+            per_obs=("diffuse_conditions",),
         )
 
     @classmethod

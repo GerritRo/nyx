@@ -7,13 +7,24 @@ import healpy as hp
 import numpy as np
 
 from nyx.core.units import to_angle_rad
-from nyx.view.allsky import PointField
 from nyx.view.response import to_linear_srgb
+from nyx.view.skyrender import PointField
 
 if TYPE_CHECKING:
-    from nyx.view.allsky import SkyRender
+    from nyx.view.skyrender import SkyRender
 
 __all__ = ["Camera"]
+
+
+def _as_rgb(values: np.ndarray) -> np.ndarray:
+    """Channel values ``(..., k)`` widened to the three the frame carries.
+
+    A single-band render photographs as a grey image; everything
+    downstream (:func:`~nyx.view.response.to_linear_srgb`, the tone
+    curve) works in three channels.
+    """
+    values = np.asarray(values)
+    return np.repeat(values, 3, axis=-1) if values.shape[-1] == 1 else values
 
 
 @dataclasses.dataclass(frozen=True)
@@ -253,7 +264,7 @@ class Camera:
         Parameters
         ----------
         sky : SkyRender
-            Rendered sky, from :func:`sky_radiance`.
+            Rendered sky, from :func:`~nyx.view.allsky.render_sky`.
         sources : list of str or str, optional
             Emitters to include (default: all).  This is the knob for
             building a picture up one component at a time.
@@ -280,11 +291,17 @@ class Camera:
             ``response units / s / m^2`` per pixel.  Multiply by the
             aperture area and the shutter time for a photon count.
         """
+        if sky.response.n_channels not in (1, 3):
+            raise ValueError(
+                f"a photograph needs a one- or three-channel response, got "
+                f"{sky.response.n_channels}; render the sky with "
+                f"SpectralResponse.cie(geo.wvls) or a single bandpass"
+            )
         az, alt, inside = self.directions()
         image = np.zeros((self.height, self.width, 3))
 
         if direct or inscatter:
-            diffuse = sky.diffuse(sources, direct=direct, inscatter=inscatter)
+            diffuse = _as_rgb(sky.diffuse(sources, direct=direct, inscatter=inscatter))
             # Clamp into the populated hemisphere so the bilinear stencil
             # never mixes in the empty half-sphere and darkens the horizon.
             theta = np.minimum(np.pi / 2 - alt, sky.horizon_theta).ravel()
@@ -297,9 +314,10 @@ class Camera:
         if points and direct:
             background = image.max(axis=-1)
             level = background[background > 0]
+            field = sky.point_field(sources).above_horizon()
             self._splat(
                 image,
-                sky.point_field(sources).above_horizon(),
+                PointField(field.az, field.alt, _as_rgb(field.flux)),
                 float(np.median(level)) if level.size else 0.0,
             )
 

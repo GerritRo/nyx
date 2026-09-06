@@ -51,6 +51,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+view = [
+    "matplotlib",
+]
+iactrace = [
+    "iactrace",
+]
+infer = [
+    "numpyro",
+]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
@@ -62,6 +71,8 @@ dev = [
     "asv>=0.6.0",
     "virtualenv>=20.0",
     "commitizen>=3.12.0",
+    "matplotlib",
+    "numpyro",
 ]
 docs = [
     "sphinx",
@@ -149,6 +160,7 @@ name = "cz_conventional_commits"
 version = "0.1.0"
 version_files = [
     "nyx/__init__.py:__version__",
+    "CITATION.cff:^version",
 ]
 tag_format = "v$version"
 update_changelog_on_bump = true

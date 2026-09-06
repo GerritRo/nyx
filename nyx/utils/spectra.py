@@ -4,7 +4,6 @@ from typing import Any
 import astropy.units as u
 import jax.numpy as jnp
 import numpy as np
-import numpy.lib.recfunctions as recfc
 import scipy.integrate as si
 from astropy.constants import c, h
 from astropy.io import fits, votable
@@ -62,13 +61,6 @@ class Bandpass:
         table = votable.parse_single_table(f_down)
         return cls(table.array.data["Wavelength"] * u.angstrom, table.array.data["Transmission"])
 
-    @classmethod
-    def from_csv(cls, file):
-        arr = np.genfromtxt(file, delimiter=",", names=True)
-        lam = arr["wvl"] * u.nm
-        trx = recfc.drop_fields(arr, "wvl", usemask=False)
-        return cls(lam, np.array(trx.tolist()).prod(axis=1))
-
 
 @dataclass
 class SpectralGrid:
@@ -81,12 +73,6 @@ class SpectralGrid:
             return self.flx
         rgi = RegularGridInterpolator(self.points, self.flx, bounds_error=False)
         return rgi(xi) * self.flx.unit
-
-    def apply_bandpass(self, bandpass):
-        mask = (self.wvl >= bandpass.min) & (self.wvl <= bandpass.max)
-        wvl = self.wvl[mask]
-        flx = np.einsum("a,...ab->...ab", bandpass(wvl), self.flx[..., mask, :])
-        return SpectralGrid(self.points, wvl, flx)
 
     def __mul__(self, value):
         return SpectralGrid(self.points, self.wvl, np.einsum("...c,...->...c", self.flx, value))
@@ -202,8 +188,9 @@ def create_color_grid(
         (min, max) of the color range to interpolate over.
     spec_library : SpectralGrid
         Spectral library to redden.
-    EBVs : array
-        E(B-V) values to sample.
+    EBV_range : tuple or None
+        ``(min, max)`` E(B-V) range sampled at 20 points (default
+        ``(0, 10)``).
     extmod : extinction model, optional
         Dust extinction model. Defaults to G23(Rv=3.1).
     photon_flux : bool

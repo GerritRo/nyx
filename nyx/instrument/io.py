@@ -169,6 +169,19 @@ def load_instrument(filepath, geo):
             sigma_x_coords = f["sigma_x_coords"][:]
             sigma_y_coords = f["sigma_y_coords"][:]
 
+        # Same coverage check the ray-tracing path runs; this is the path
+        # users actually take, so it has to fire here too.
+        from nyx.instrument._iactrace import _warn_on_mismatch
+        from nyx.instrument._interpolation import response_centroid
+
+        _warn_on_mismatch(
+            geo,
+            f["bandpass/wavelength"][:],
+            f["bandpass/transmission"][:],
+            response_centroid(geometry, values),
+            stacklevel=3,
+        )
+
     if itype == "EffectiveApertureMisalignmentInstrument":
         from nyx.instrument.effective_aperture import (
             EffectiveApertureMisalignmentInstrument,

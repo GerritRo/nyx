@@ -11,6 +11,53 @@ if TYPE_CHECKING:
     from nyx.core.scene import _RenderFrame
 
 
+def contributions(scene: _RenderFrame) -> dict[str, jax.Array]:
+    """Pixel rates of each source separately, summing to :func:`render`.
+
+    :func:`render` accumulates every source before the instrument sees
+    them, so a finished image cannot say which emitter lit a pixel.  This
+    holds the accumulation open.  The atmosphere kernel is still built
+    once; only the contractions and projections against it repeat, and
+    each is linear in the source's radiance, so the parts sum to the whole
+    to float32 rounding.
+    """
+    inst = scene.instrument
+    atmo = scene.atmosphere
+    sky = scene.render_geometry.sky
+    pm = scene.render_geometry.pointing_matrix
+    bp = inst.bandpass
+    pm_corr = inst.corrected_pm(pm)
+    atmo_result = atmo.evaluate(sky)
+
+    out: dict[str, jax.Array] = {}
+    for name, (source, obs_data) in zip(scene.source_names, scene.sources, strict=True):
+        rate = jnp.zeros(())
+        diffuse = source.diffuse_radiance(sky, obs_data)
+        if diffuse is not None:
+            rate = rate + inst.project_scattered(atmo_result.apply_scattering(diffuse, bp))
+            if obs_data.direct:
+                rate = rate + inst.project_diffuse(atmo_result.apply_extinction(diffuse, bp), pm)
+        pts = source.point_sources(obs_data)
+        if pts is not None:
+            if obs_data.inscatter:
+                rate = rate + inst.project_scattered(
+                    atmo.scatter_sources(sky, pts.coords, pts.spectra, bp)
+                )
+            az, alt = pts.coords[:, 0], pts.coords[:, 1]
+            extincted = atmo.extinct(alt[:, None], pts.spectra, sky.height_km)
+            flux = jnp.sum(extincted * bp, axis=1)
+            lon, lat = altaz_to_offset(az, alt, pm_corr)
+            rate = rate + inst.project_catalog(jnp.stack([lon, lat], axis=-1), flux)
+        out[name] = inst.efficiency.value * rate
+
+    # A source contributing nothing leaves a scalar zero; give every entry
+    # the pixel shape so the dict is uniform.
+    shaped = [r.shape for r in out.values() if r.ndim]
+    if shaped:
+        out = {k: jnp.broadcast_to(v, shaped[0]) for k, v in out.items()}
+    return out
+
+
 def render(scene: _RenderFrame) -> jax.Array:
     """Render a single-observation scene to pixel rates.
 

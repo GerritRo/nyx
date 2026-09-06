@@ -1,17 +1,14 @@
 """Looking at a nyx sky, rather than measuring it.
 
-:mod:`nyx.core` and :mod:`nyx.instrument` answer *what does my telescope
-record*: emitters summed, projected onto detector pixels, differentiable,
-fitted.  This subpackage answers the sibling question -- *what does that
-sky look like* -- over the whole hemisphere, emitter by emitter.
+Where :mod:`nyx.core` and :mod:`nyx.instrument` answer *what does my
+telescope record*, this subpackage answers *what does that sky look like*
+over the whole hemisphere, emitter by emitter.  Both sit on the same sky
+model and neither depends on the other; the one thing that passes between
+them is a value, not a dependency, since an instrument's bandpass is a
+perfectly good :class:`~nyx.view.response.SpectralResponse`.
 
-Both sit on the same sky model and neither depends on the other.  The one
-thing that passes between them is a value, not a dependency: an
-instrument's bandpass is a perfectly good
-:class:`~nyx.view.response.SpectralResponse` for a view.
-
-One renderer serves both presentations, and which you get is decided
-entirely by the width of that response:
+One renderer serves both presentations, and the width of that response
+decides which you get:
 
 - one channel -- a telescope's own passband -- gives the HEALPix maps
   behind :meth:`~nyx.core.scene.Scene.sky_view`, drawn by
@@ -33,17 +30,15 @@ Examples
     image = cam.expose(sky)                      # linear sRGB
     picture = ToneCurve.fit(image)(image, alpha=cam.horizon())
 
-Plotting needs matplotlib, declared as the ``view`` extra (``pip install
-nyx[view]``) and imported lazily, so nothing here requires it until you
-draw something.  In practice healpy pulls matplotlib in anyway, so the
-extra is about stating the dependency honestly rather than about keeping
-it out of a base install.
+Plotting needs matplotlib, declared as the ``view`` extra and imported
+lazily, so nothing here requires it until you draw something.
 """
 
-from .allsky import PointField, SkyRender, render_sky
+from .allsky import render_prepared, render_sky
 from .camera import Camera
 from .display import ToneCurve, add_noise, plot_maps, tonemap
 from .response import XYZ_TO_SRGB, SpectralResponse, cie_xyz, to_linear_srgb
+from .skyrender import PointField, SkyRender
 
 __all__ = [
     "XYZ_TO_SRGB",
@@ -55,6 +50,7 @@ __all__ = [
     "add_noise",
     "cie_xyz",
     "plot_maps",
+    "render_prepared",
     "render_sky",
     "to_linear_srgb",
     "tonemap",
