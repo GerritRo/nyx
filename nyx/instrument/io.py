@@ -1,3 +1,5 @@
+"""Reading and writing instruments in nyx's own HDF5 format."""
+
 from pathlib import Path
 
 import h5py
@@ -21,22 +23,18 @@ FORMAT_VERSION = "2.0"
 def tabulated_bandpass(wavelength_nm, transmission):
     """Build an instrument bandpass callable from a tabulated curve.
 
-    A callable taking wavelengths -- a plain array in nm or an astropy
-    :class:`~astropy.units.Quantity` -- and returning the instrument's
-    effective aperture times transmission there, in m^2.  Linearly
-    interpolated between samples and zero outside the tabulated range.
-
     Parameters
     ----------
-    wavelength_nm : array, shape (n,)
-        Sample wavelengths in nm (or a Quantity), strictly increasing.
-    transmission : array, shape (n,)
-        Bandpass value at each sample.
+    wavelength_nm : array-like, shape (n,)
+        Sample wavelengths in nm, or a Quantity, strictly increasing.
+    transmission : array-like, shape (n,)
+        Effective aperture times transmission at each sample, in m^2.
 
     Returns
     -------
     callable
-        ``wavelength -> bandpass``.
+        ``wavelength -> bandpass``, linearly interpolated between samples
+        and zero outside the tabulated range.
     """
     wvl_tab = np.asarray(to_wavelength_nm(wavelength_nm), dtype=float).reshape(-1)
     transmission_tab = np.asarray(transmission, dtype=float).reshape(-1)
@@ -54,7 +52,7 @@ def tabulated_bandpass(wavelength_nm, transmission):
 
 
 def _load_bandpass(f):
-    """Read bandpass from an open HDF5 file handle, return callable."""
+    """Read a bandpass from an open HDF5 file handle, as a callable."""
     return tabulated_bandpass(f["bandpass/wavelength"][:], f["bandpass/transmission"][:])
 
 
@@ -90,22 +88,16 @@ def _save_common(f, inst, wavelength_range, wavelength_samples, metadata):
 def save_instrument(
     inst, filepath, wavelength_range=(200, 1000), wavelength_samples=1000, metadata=None
 ):
-    """Save any instrument to HDF5 file.
-
-    Dispatches on the instrument type to write the correct format.
+    """Save an instrument to HDF5, dispatching on its type.
 
     Parameters
     ----------
     inst : InstrumentModel
-        Instrument to save.
-    filepath : str or Path
-        Output HDF5 path.
-    wavelength_range : tuple
-        (min, max) wavelength in nm for bandpass tabulation.
+    filepath : str or path-like
+    wavelength_range : tuple of float
+        ``(min, max)`` in nm, for the bandpass tabulation.
     wavelength_samples : int
-        Number of wavelength samples to tabulate.
     metadata : dict or None
-        Optional metadata to store.
     """
     from nyx.instrument.effective_aperture import (
         EffectiveApertureMisalignmentInstrument,
@@ -129,17 +121,14 @@ def save_instrument(
 
 
 def load_instrument(filepath, geo):
-    """Load any instrument from HDF5 file.
-
-    Dispatches on the ``instrument_type`` attribute stored in the file.
+    """Load an instrument from HDF5, dispatching on its stored ``instrument_type``.
 
     Parameters
     ----------
-    filepath : str or Path
-        Path to an HDF5 file in format :data:`FORMAT_VERSION`.  Convert
-        older files with ``scripts/migrate_instrument.py``.
+    filepath : str or path-like
+        An HDF5 file in format :data:`FORMAT_VERSION`; convert older files
+        with ``scripts/migrate_instrument.py``.
     geo : Geometry
-        Resolution configuration.
 
     Returns
     -------

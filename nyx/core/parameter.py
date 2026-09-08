@@ -1,8 +1,9 @@
+"""The trainable parameter: a value, a scale, and how to constrain it."""
+
 from __future__ import annotations
 
 import dataclasses
-import fnmatch
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable
 from typing import Any
 
 import equinox as eqx
@@ -11,31 +12,9 @@ import jax.numpy as jnp
 import numpy as np
 from numpy.typing import ArrayLike
 
-__all__ = [
-    "Parameter",
-    "autoscale",
-    "freeze",
-    "unfreeze",
-    "freeze_all",
-    "unfreeze_all",
-    "parameters_table",
-    "dump_params",
-    "n_trainable",
-    "set_parameters",
-]
+__all__ = ["Parameter", "is_parameter"]
 
 
-def _navigate(obj: Any, path: tuple[Any, ...]) -> Any:
-    """Follow a path tuple through a mix of eqx.Modules, dicts, lists, tuples."""
-    for step in path:
-        if isinstance(step, int) or isinstance(obj, dict):
-            obj = obj[step]
-        else:
-            obj = getattr(obj, step)
-    return obj
-
-
-# Parameter transforms
 _TRANSFORMS: dict[str | None, tuple[Callable, Callable, Callable]] = {
     None: (lambda u: u, lambda v: v, lambda u: jnp.ones_like(u)),
     "log": (jnp.exp, jnp.log, jnp.exp),
@@ -59,14 +38,18 @@ _TRANSFORM_DOMAINS: dict[str | None, str] = {
 def _scale10(value: ArrayLike) -> float:
     """Return ``10 ** floor(log10(max |value|))``, or 1.0 for zero input.
 
-    Used by :meth:`Parameter.from_value` to pick a default scale when the
-    caller does not supply one.
+    Parameters
+    ----------
+    value : array-like
+
+    Returns
+    -------
+    float
     """
     v = float(jnp.max(jnp.abs(jnp.asarray(value))))
     if v == 0.0 or not np.isfinite(v):
         return 1.0
     return float(10.0 ** np.floor(np.log10(v)))
-
 
 class Parameter(eqx.Module):
     """A trainable physical parameter with an explicit characteristic scale.
@@ -74,24 +57,18 @@ class Parameter(eqx.Module):
     Attributes
     ----------
     factor : jax.Array
-        The JAX leaf.  O(1) by construction when ``scale`` is chosen
-        correctly.  This is the only pytree leaf; ``scale``, ``per_obs``,
-        ``frozen`` and ``transform`` are static metadata.
+        The only pytree leaf; O(1) for a well-chosen *scale*.
     scale : float
-        Characteristic scale, in the *unconstrained* space the optimizer
-        steps in.  Set once (typically at construction) and static for
-        JIT; change it via :func:`autoscale` or by building a new
-        Parameter.  Transformed parameters default to ``1.0``.
+        Characteristic scale in the unconstrained space, static for JIT.
+        Change it via :func:`~nyx.core.paramtree.autoscale`.
     per_obs : bool
-        If True, this parameter carries a leading ``(nobs, ...)`` axis
-        after :func:`tile_per_obs`; typical for instrument pointing
-        (``shift``, ``rotation``).
+        Whether the parameter carries a leading ``(nobs, ...)`` axis after
+        :func:`~nyx.core.filters.tile_per_obs`.
     frozen : bool
-        If True, the parameter is excluded from optimization even when
-        selected by default.
+        Whether the parameter is excluded from optimization.
     transform : str or None
-        ``None`` (unconstrained), ``'log'`` or ``'softplus'`` for a
-        positive quantity, or ``'tanh'`` for one confined to ``(-1, 1)``.
+        ``None`` (unconstrained), ``'log'`` or ``'softplus'`` for a positive
+        quantity, or ``'tanh'`` for one confined to ``(-1, 1)``.
     """
 
     factor: jax.Array
@@ -107,11 +84,7 @@ class Parameter(eqx.Module):
 
     @property
     def dvalue_dfactor(self) -> jax.Array:
-        """``d value / d factor``, elementwise.
-
-        The delta-method factor that turns an uncertainty on ``factor``
-        into one on :attr:`value`; ``scale`` when untransformed.
-        """
+        """``d value / d factor``, elementwise; ``scale`` when untransformed."""
         return self.scale * _TRANSFORMS[self.transform][2](self.factor * self.scale)
 
     def __repr__(self) -> str:
@@ -151,16 +124,21 @@ class Parameter(eqx.Module):
         Parameters
         ----------
         value : array-like
-            Physical value (in the original physical units).  Must lie in
-            the domain of *transform*.
+            Physical value; must lie in the domain of *transform*.
         scale : float or None
-            Characteristic scale.  When ``None``, chosen as
-            ``10**floor(log10(max|value|))`` of the unconstrained value;
-            1.0 for zero or for any transformed parameter.
+            Characteristic scale.  When ``None``, ``10**floor(log10(max|value|))``
+            of the unconstrained value; 1.0 if that is zero or *transform* is set.
         per_obs, frozen : bool
-            Metadata flags; see class docstring.
         transform : str or None
-            Domain constraint; see class docstring.
+
+        Returns
+        -------
+        Parameter
+
+        Raises
+        ------
+        ValueError
+            If *transform* is unknown, or *value* lies outside its domain.
         """
         if transform not in _TRANSFORMS:
             raise ValueError(
@@ -190,324 +168,15 @@ class Parameter(eqx.Module):
         )
 
 
-# Tree-level utilities
+def is_parameter(x: Any) -> bool:
+    """Whether *x* is a :class:`Parameter`; the ``is_leaf`` predicate throughout.
 
+    Parameters
+    ----------
+    x : object
 
-def _is_param(x: Any) -> bool:
+    Returns
+    -------
+    bool
+    """
     return isinstance(x, Parameter)
-
-
-def autoscale[T](tree: T) -> T:
-    """Rescale every :class:`Parameter` in *tree* using :func:`_scale10`.
-
-    ``value`` is preserved; ``factor`` is brought into the [0.1, 10) band
-    (up to sign) for non-zero parameters.  Metadata (``per_obs``,
-    ``frozen``, ``transform``) is preserved.  Transformed parameters keep
-    ``scale = 1.0``: their factors are O(1) by construction.
-    """
-
-    def at_leaf(x: Any) -> Any:
-        if _is_param(x):
-            return Parameter.from_value(
-                x.value,
-                per_obs=x.per_obs,
-                frozen=x.frozen,
-                transform=x.transform,
-            )
-        return x
-
-    return jax.tree.map(at_leaf, tree, is_leaf=_is_param)
-
-
-def freeze_all[T](tree: T) -> T:
-    """Return *tree* with every :class:`Parameter` frozen."""
-    return jax.tree.map(
-        lambda x: x.freeze() if _is_param(x) else x,
-        tree,
-        is_leaf=_is_param,
-    )
-
-
-def unfreeze_all[T](tree: T) -> T:
-    """Return *tree* with every :class:`Parameter` unfrozen."""
-    return jax.tree.map(
-        lambda x: x.unfreeze() if _is_param(x) else x,
-        tree,
-        is_leaf=_is_param,
-    )
-
-
-def _apply_selector[T](
-    tree: T, selector: Callable[[Any], Any], op: Callable[[Parameter], Parameter]
-) -> T:
-    """Apply *op* (a Parameter → Parameter function) at the position pointed
-    to by *selector* (a ``eqx.tree_at`` callable).
-    """
-    target = selector(tree)
-    if not _is_param(target):
-        raise TypeError(f"Selector must resolve to a Parameter, got {type(target).__name__}.")
-    return eqx.tree_at(selector, tree, op(target))
-
-
-def _matching_paths(tree: Any, pattern: str) -> list[tuple[Any, ...]]:
-    """Internal paths of every Parameter whose displayed name matches.
-
-    Globbed against the names :func:`parameters_table` prints, so one
-    spelling addresses a parameter everywhere.
-    """
-    found = [
-        path for path, _ in _iter_parameters(tree) if fnmatch.fnmatch(_friendly_path(path), pattern)
-    ]
-    if not found:
-        known = sorted(_friendly_path(path) for path, _ in _iter_parameters(tree))
-        raise KeyError(
-            f"{pattern!r} matches no parameter. A pattern that matches nothing is "
-            f"almost always a typo, so it is refused rather than silently ignored. "
-            f"Available: {', '.join(known) if known else '(none)'}"
-        )
-    return found
-
-
-def _apply_at_paths[T](
-    tree: T, paths: list[tuple[Any, ...]], op: Callable[[Parameter], Parameter]
-) -> T:
-    """Apply *op* to the Parameters at *paths*."""
-    return eqx.tree_at(
-        lambda t: tuple(_navigate(t, p) for p in paths),
-        tree,
-        tuple(op(_navigate(tree, p)) for p in paths),
-    )
-
-
-def _apply[T](tree: T, selectors: tuple[Any, ...], op: Callable[[Parameter], Parameter]) -> T:
-    for sel in selectors:
-        if isinstance(sel, str):
-            tree = _apply_at_paths(tree, _matching_paths(tree, sel), op)
-        else:
-            tree = _apply_selector(tree, sel, op)
-    return tree
-
-
-def freeze[T](tree: T, *selectors: str | Callable[[Any], Any]) -> T:
-    """Return *tree* with the Parameters at *selectors* frozen.
-
-    A selector is the parameter's name -- what :func:`parameters_table`
-    prints and :func:`set_parameters` accepts -- optionally globbed::
-
-        scene = freeze(scene, 'CT1.efficiency', '*.pixel_efficiency')
-
-    A pattern matching nothing raises rather than doing nothing quietly.
-    A selector may also be an :func:`equinox.tree_at` callable, which
-    reaches what the names cannot.
-    """
-    return _apply(tree, selectors, Parameter.freeze)
-
-
-def unfreeze[T](tree: T, *selectors: str | Callable[[Any], Any]) -> T:
-    """Return *tree* with the Parameters addressed by *selectors* unfrozen.
-
-    See :func:`freeze` for the selector convention.
-    """
-    return _apply(tree, selectors, Parameter.unfreeze)
-
-
-# Auto-wrap helper used by Scene.set / set_params
-
-
-def _wrap_like(target: Any, value: Any) -> Any:
-    """If *target* is a :class:`Parameter` and *value* is not, wrap
-    *value* into a new Parameter that preserves *target*'s ``scale``,
-    ``per_obs``, ``frozen`` and ``transform`` metadata.  Otherwise return
-    *value* unchanged.
-    """
-    if _is_param(target) and not _is_param(value):
-        return Parameter.from_value(
-            value,
-            scale=target.scale,
-            per_obs=target.per_obs,
-            frozen=target.frozen,
-            transform=target.transform,
-        )
-    return value
-
-
-def _wrap_value(path: str, target: Any, value: Any) -> Any:
-    """Wrap *value* for the Parameter at *path*, checking it fits.
-
-    ``eqx.tree_at`` validates tree structure but not leaf shapes, so a
-    wrong-length array would otherwise be accepted and broadcast silently
-    at render time.  A scalar may fill any shape: the one broadcast that
-    cannot be a mistake.
-    """
-    wrapped = _wrap_like(target, value)
-    if _is_param(target) and _is_param(wrapped):
-        want = jnp.shape(target.factor)
-        got = jnp.shape(wrapped.factor)
-        if got != () and got != want:
-            per_obs = " (leading axis is the observation count)" if target.per_obs else ""
-            raise ValueError(
-                f"{path!r} has shape {want}{per_obs}, but the value given has shape "
-                f"{got}; pass a matching array or a scalar to fill it"
-            )
-    return wrapped
-
-
-# Parameters table (pretty-print)
-
-# Intermediate container names to hide from displayed paths:
-# ``instruments.CT1.shift`` reads better as ``CT1.shift``.
-_HIDDEN_PATH_SEGMENTS = {
-    "instruments",
-    "sources",
-    "components",
-    "target_scenes",
-    "canonical_instruments",
-}
-
-
-def _iter_parameters(
-    tree: Any, _prefix: tuple[Any, ...] = ()
-) -> Iterator[tuple[tuple[Any, ...], Parameter]]:
-    """Yield ``(path_tuple, Parameter)`` for every Parameter in *tree*."""
-    if _is_param(tree):
-        yield _prefix, tree
-        return
-    if isinstance(tree, eqx.Module):
-        for name in tree.__dataclass_fields__:
-            yield from _iter_parameters(getattr(tree, name), _prefix + (name,))
-    elif isinstance(tree, dict):
-        for key, child in tree.items():
-            yield from _iter_parameters(child, _prefix + (key,))
-    elif isinstance(tree, (list, tuple)):
-        for i, child in enumerate(tree):
-            yield from _iter_parameters(child, _prefix + (i,))
-
-
-def _friendly_keypath(keypath: Iterable[Any]) -> str:
-    """A jax KeyPath as the same dotted name :func:`_friendly_path` gives.
-
-    jax's own ``keystr`` renders ``sources['airglow'].spectral_model``;
-    everything user-facing in nyx spells that ``airglow.spectral_model``.
-    """
-    parts = []
-    for entry in keypath:
-        for attr in ("name", "key", "idx"):
-            if hasattr(entry, attr):
-                parts.append(getattr(entry, attr))
-                break
-    return _friendly_path(p for p in parts if p != "factor")
-
-
-def _friendly_path(parts: Iterable[Any]) -> str:
-    return ".".join(str(p) for p in parts if p not in _HIDDEN_PATH_SEGMENTS)
-
-
-def _format_value(param: Parameter) -> str:
-    v = np.asarray(param.value)
-    if v.ndim == 0:
-        return f"{float(v):+.4e}"
-    lo, hi = float(np.min(v)), float(np.max(v))
-    if lo == hi:
-        return f"{lo:+.4e}"
-    return f"[{lo:+.4e}, {hi:+.4e}]"
-
-
-class _ParametersTable:
-    """Pretty-printable listing of every :class:`Parameter` in a pytree.
-
-    Instances render as a fixed-width text table via ``str``/``repr``
-    and as an HTML table in Jupyter via ``_repr_html_``.
-    """
-
-    _COLS = ("name", "value", "scale", "shape", "per_obs", "frozen", "transform")
-
-    def __init__(self, rows: Iterable[dict[str, str]]) -> None:
-        # rows: list of dicts with the keys in ``_COLS``.
-        self._rows = list(rows)
-
-    def __len__(self) -> int:
-        return len(self._rows)
-
-    def __iter__(self) -> Iterator[dict[str, str]]:
-        return iter(self._rows)
-
-    def __repr__(self) -> str:
-        if not self._rows:
-            return "Parameters: (none)"
-        widths = {c: max(len(c), *(len(r[c]) for r in self._rows)) for c in self._COLS}
-        sep = "  "
-        header = sep.join(c.ljust(widths[c]) for c in self._COLS)
-        rule = sep.join("-" * widths[c] for c in self._COLS)
-        body = "\n".join(sep.join(r[c].ljust(widths[c]) for c in self._COLS) for r in self._rows)
-        return f"{header}\n{rule}\n{body}"
-
-    __str__ = __repr__
-
-    def _repr_html_(self) -> str:
-        if not self._rows:
-            return "<p>Parameters: (none)</p>"
-        head = "".join(f"<th>{c}</th>" for c in self._COLS)
-        body = "".join(
-            "<tr>" + "".join(f"<td>{r[c]}</td>" for c in self._COLS) + "</tr>" for r in self._rows
-        )
-        return f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
-
-
-def parameters_table(tree: Any) -> _ParametersTable:
-    """Build a :class:`_ParametersTable` listing every Parameter in *tree*.
-
-    Paths are displayed in the same short form used by
-    :meth:`nyx.core.scene.Scene.set` (internal container names like
-    ``instruments`` or ``components`` are stripped)."""
-    rows = []
-    for path, p in _iter_parameters(tree):
-        rows.append(
-            {
-                "name": _friendly_path(path),
-                "value": _format_value(p),
-                "scale": f"{p.scale:.2e}",
-                "shape": str(tuple(np.asarray(p.factor).shape)),
-                "per_obs": "yes" if p.per_obs else "-",
-                "frozen": "yes" if p.frozen else "-",
-                "transform": p.transform or "-",
-            }
-        )
-    rows.sort(key=lambda r: r["name"])
-    return _ParametersTable(rows)
-
-
-def set_parameters[T](tree: T, params: dict[str, Any]) -> T:
-    """Set Parameters by the names :func:`parameters_table` prints.
-
-    Patterns may glob, writing one value to a group.  A raw value is
-    wrapped preserving the target's ``scale``, ``per_obs``, ``frozen`` and
-    ``transform``, and must match its shape or be a scalar.
-    """
-    for pattern, value in params.items():
-        for path in _matching_paths(tree, pattern):
-            target = _navigate(tree, path)
-            tree = _apply_at_paths(
-                tree, [path], lambda _t, p=pattern, tg=target, v=value: _wrap_value(p, tg, v)
-            )
-    return tree
-
-
-def n_trainable(tree: Any) -> int:
-    """Number of free scalar values: the ``n`` of a reduced chi-squared.
-
-    Read from the same ``frozen`` flags the optimizer uses, so it cannot
-    drift from the parameters actually being fitted.
-    """
-    return sum(
-        int(np.size(np.asarray(p.factor))) for _, p in _iter_parameters(tree) if not p.frozen
-    )
-
-
-def dump_params(tree: Any) -> dict[str, np.ndarray]:
-    """Return ``{friendly_path: ndarray}`` of every Parameter's physical value.
-
-    Paths match those used by :meth:`nyx.core.scene.Scene.set_params`, so
-    the dict round-trips: ``scene.set_params(dump_params(scene))`` is a
-    no-op.  Frozen parameters are included.
-    """
-    return {_friendly_path(path): np.asarray(p.value) for path, p in _iter_parameters(tree)}

@@ -1,3 +1,5 @@
+"""Instruments built from an effective-aperture response table."""
+
 from collections.abc import Callable
 
 import astropy.units as u
@@ -6,13 +8,12 @@ import jax
 import jax.numpy as jnp
 
 # Load jax_healpy (later force it to float32)
-import jax_healpy as jhp  # noqa: E402
+import jax_healpy as jhp
 import numpy as np
 
 from nyx.core.coordinates import offset_to_altaz, safe_arcsin
 from nyx.core.parameter import Parameter
 from nyx.core.protocols import InstrumentModel
-from nyx.core.spectral import bin_widths
 from nyx.instrument._interpolation import (
     PixelLattice,
     integrate_response,
@@ -21,6 +22,7 @@ from nyx.instrument._interpolation import (
     project_lattice,
     response_centroid,
 )
+from nyx.utils.spectra import bin_widths
 
 jax.config.update("jax_enable_x64", False)
 
@@ -39,15 +41,9 @@ class _BaseApertureInstrument(InstrumentModel):
     """An instrument whose pixels have a centre, a throughput weight and a bandpass.
 
     Every subclass is trainable in ``efficiency``, ``pixel_efficiency``,
-    ``shift`` and ``rotation``, the last two per observation.
-
-    Notes
-    -----
-    The forward model uses ``efficiency * pixel_efficiency[i]`` for each
-    pixel, so the absolute scale of ``pixel_efficiency`` is degenerate
-    with ``efficiency``.  Freeze one of them before fitting (e.g.
-    ``model = nyx.core.parameter.freeze(model, 'efficiency')``, or freeze
-    a single reference pixel) to obtain a unique MLE and finite errors.
+    ``shift`` and ``rotation``, the last two per observation.  The forward
+    model uses ``efficiency * pixel_efficiency[i]``, so the two are
+    degenerate: freeze one before fitting for a unique MLE.
     """
 
     efficiency: eqx.AbstractVar[Parameter]
@@ -75,7 +71,7 @@ class _BaseApertureInstrument(InstrumentModel):
 
     @property
     def bandpass(self):
-        """Spectral transmission curve, without efficiency. Shape [n_wvl]."""
+        """Spectral transmission curve, shape ``(n_wvl,)``, excluding efficiency."""
         return self.bandpass_values
 
     @property
@@ -84,7 +80,12 @@ class _BaseApertureInstrument(InstrumentModel):
         raise NotImplementedError
 
     def _correction_matrix(self):
-        """Rotation (3, 3) taking the nominal offset frame to the detector frame."""
+        """Rotation taking the nominal offset frame to the detector frame.
+
+        Returns
+        -------
+        jax.Array, shape (3, 3)
+        """
         dlon, dlat = self.shift.value[0], self.shift.value[1]
         rot = self.rotation.value
 
@@ -102,14 +103,24 @@ class _BaseApertureInstrument(InstrumentModel):
         return Rx @ Ry @ Rz
 
     def corrected_pm(self, pm):
-        """Nominal pointing matrix (3, 3), corrected for shift and rotation."""
+        """Pointing matrix corrected for shift and rotation.
+
+        Parameters
+        ----------
+        pm : jax.Array, shape (3, 3)
+
+        Returns
+        -------
+        jax.Array, shape (3, 3)
+        """
         return self._correction_matrix() @ pm
 
     def _nominal_centers(self):
-        """Pixel centres (n_pix, 2) mapped back to the nominal offset frame.
+        """Pixel centres in the nominal offset frame, where the FOV grid lives.
 
-        The FOV scattering grid lives in that frame, so looking pixels up
-        on it means undoing the detector correction first.
+        Returns
+        -------
+        jax.Array, shape (n_pix, 2)
         """
         dR_inv = self._correction_matrix().T  # orthogonal inverse
         # Lattice axis 0 is longitude
@@ -123,19 +134,32 @@ class _BaseApertureInstrument(InstrumentModel):
         return jnp.stack([nom_lon, nom_lat], axis=-1)
 
     def project_scattered(self, eval_grid_values):
-        """Sample the FOV scattering grid (n_lon, n_lat) at each pixel.
+        """Sample the FOV scattering grid at each pixel.
 
-        Returns rates [n_pixels].
+        Parameters
+        ----------
+        eval_grid_values : jax.Array, shape (n_lon, n_lat)
+
+        Returns
+        -------
+        jax.Array, shape (n_pixels,)
         """
         centers_nom = self._nominal_centers()  # [lon, lat] per pixel
         rates = interpolate_pixel_rates(self._eval_grid, eval_grid_values, centers_nom)
         return rates * self.weight * self.pixel_efficiency.value
 
     def project_diffuse(self, hp_values, pm):
-        """Sample a band-integrated HEALPix sky [n_hp] at each pixel.
+        """Sample a band-integrated HEALPix sky at each pixel.
 
-        ``pm`` is the nominal pointing matrix (3, 3).  Returns rates
-        [n_pixels].
+        Parameters
+        ----------
+        hp_values : jax.Array, shape (npix,)
+        pm : jax.Array, shape (3, 3)
+            Nominal pointing matrix.
+
+        Returns
+        -------
+        jax.Array, shape (n_pixels,)
         """
         R = self.corrected_pm(pm)
         # Lattice axis 0 is longitude
@@ -147,14 +171,14 @@ class _BaseApertureInstrument(InstrumentModel):
         return rates * self.weight * self.pixel_efficiency.value
 
     def save(self, filepath, wavelength_range=(200, 1000), wavelength_samples=1000, metadata=None):
-        """Write to HDF5; see :func:`nyx.instrument.io.save_instrument`."""
+        """Write to HDF5; see :func:`~nyx.instrument.io.save_instrument`."""
         from nyx.instrument.io import save_instrument
 
         save_instrument(self, filepath, wavelength_range, wavelength_samples, metadata)
 
     @classmethod
     def load(cls, filepath, geo):
-        """Read from HDF5; see :func:`nyx.instrument.io.load_instrument`."""
+        """Read from HDF5; see :func:`~nyx.instrument.io.load_instrument`."""
         from nyx.instrument.io import load_instrument
 
         return load_instrument(filepath, geo)
@@ -176,70 +200,34 @@ class _BaseApertureInstrument(InstrumentModel):
     ):
         """Build an instrument by ray-tracing an iactrace telescope and camera.
 
-        Requires the optional ``nyx[iactrace]`` dependency.
+        Needs the optional ``nyx[iactrace]`` dependency.
 
         Parameters
         ----------
         geo : Geometry
         telescope : iactrace.Telescope
-            The optics.
         camera : iactrace.Camera
         half_angle : float
-            Half-width of the field to scan, in radians.
+            Half-width of the field to scan, in radians; must clear the
+            camera radius over the focal length.
         step : float
-            Field-angle lattice spacing, in radians.
+            Field-angle lattice spacing, in radians; around an eighth of the
+            angular pixel pitch resolves a pixel response.
         wavelengths : array-like
             Wavelength grid in nm the bandpass is tabulated on.
         window : int or None
-            Side length of each pixel's response window, in nodes. None
+            Side length of each pixel's response window, in nodes; ``None``
             measures it.
         chunk_size : int
             Field directions traced per render call.
         progress : bool
-            Print scan progress to stderr.
+            Whether to print scan progress to stderr.
         **scan_kwargs
-            Anything else :func:`iactrace.analysis.effective_aperture` accepts.
+            Anything else :func:`iactrace.analysis.effective_aperture` takes.
 
-        Examples
-        --------
-        ::
-
-            import astropy.units as u
-            import jax
-            import jax.numpy as jnp
-            import numpy as np
-            from iactrace import Camera, Telescope
-
-            from nyx.core.geometry import Geometry
-            from nyx.instrument import EffectiveApertureInstrument
-
-            geo = Geometry(wvls=jnp.linspace(300, 700, 50) * u.nm,
-                           nside=16, ngrid=2, fov=3.5 * u.deg)
-
-            telescope = Telescope.from_yaml("CT3.yaml", n_samples=100, key=jax.random.key(0))
-            camera = Camera.from_yaml("HESS1U.yaml")
-
-            instrument = EffectiveApertureInstrument.from_iactrace(
-                geo, telescope, camera,
-                half_angle=np.radians(3.0),      # camera subtends 2.5 deg, plus margin
-                step=np.radians(0.16 / 8),       # pixel pitch / 8
-                wavelengths=np.linspace(300, 700, 64),
-                progress=True,
-            )
-            instrument.save("CT3.h5")
-
-        The scan is the expensive step, so do it once and reload afterwards::
-
-            instrument = EffectiveApertureInstrument.load("CT3.h5", geo)
-
-        Sampling
-        --------
-        *Angular* sampling is the field and the step you scan it at. ``half_angle``
-        has to clear the camera: take its radius over the focal length, so H.E.S.S.
-        CT3 at 0.66 m and 15.03 m subtends ``atan(0.66/15.03) = 2.5 deg`` and 3 deg
-        is a sensible field. ``step`` sets how well each pixel's response *shape*
-        is resolved: work from the angular pixel pitch, so CT3's 0.16 deg pixels
-        give ``0.16/8 = 0.02 deg`` for production and ``0.16/2`` for a draft.
+        Returns
+        -------
+        EffectiveApertureInstrument
         """
         scan_kwargs.update(
             half_angle=half_angle,
@@ -257,37 +245,16 @@ class _BaseApertureInstrument(InstrumentModel):
     def from_iactrace_table(cls, geo, table):
         """Build an instrument from an already-scanned effective-aperture table.
 
-        The scan is the expensive step -- hours of Monte-Carlo ray tracing --
-        so the normal workflow is to do it once in iactrace, save the table,
-        and build from the file ever after::
-
-            # once, wherever iactrace is installed
-            table = iactrace.analysis.effective_aperture(telescope, camera, ...)
-            table.save("CT3_aperture.npz")
-
-            # ever after, with no ray tracer in the environment
-            inst = EffectiveApertureInstrument.from_iactrace_table(geo, "CT3_aperture.npz")
-
         Parameters
         ----------
         geo : Geometry
-            Resolution configuration.
         table : path-like or EffectiveApertureTable
             A ``.npz`` file written by ``iactrace.io.save_aperture_table``, or
-            a table object in hand.  Reading a file needs only numpy; iactrace
-            is required only to produce one.
+            a table in hand.  Reading a file needs only numpy.
 
         Returns
         -------
         EffectiveApertureInstrument
-
-        Notes
-        -----
-        The resulting instrument is a nyx object like any other, so
-        :meth:`save` writes it in nyx's own HDF5 format and :meth:`load`
-        reads it back.  Keep the ``.npz`` if you want the raw table (its
-        un-normalised areas and its provenance); keep the ``.h5`` if you
-        want the instrument.
         """
         from nyx.instrument._iactrace import build_from_table
 
@@ -300,9 +267,8 @@ class _BaseApertureInstrument(InstrumentModel):
 class _LatticeApertureInstrument(_BaseApertureInstrument):
     """An aperture instrument whose response is tabulated on a shared lattice.
 
-    Adds the frozen-table half of the model: a :class:`PixelLattice` and a
-    per-pixel response window on it, from which pixel centres and the
-    point-source projection follow.
+    Adds a :class:`~nyx.instrument._interpolation.PixelLattice` and a
+    per-pixel response window on it.
     """
 
     lattice: eqx.AbstractVar[PixelLattice]
@@ -315,16 +281,22 @@ class _LatticeApertureInstrument(_BaseApertureInstrument):
 
     @property
     def grid(self):
-        """Per-pixel response sample coordinates. Shape [n_pix, 2, grid_dim]."""
+        """Per-pixel response sample coordinates, shape ``(n_pix, 2, grid_dim)``."""
         return self.lattice.grid
 
     def project_catalog(self, source_coords, source_fluxes):
-        """Project point sources onto pixels, returning rates [n_pixels].
+        """Project point sources onto pixels.
 
-        ``source_coords`` (n_sources, 2) are offset-frame coordinates
-        already in the detector frame, and ``source_fluxes`` (n_sources,)
-        already band-integrated and extincted -- the render pipeline does
-        both before calling this.
+        Parameters
+        ----------
+        source_coords : jax.Array, shape (n_sources, 2)
+            Offset-frame coordinates, already in the detector frame.
+        source_fluxes : jax.Array, shape (n_sources,)
+            Already band-integrated and extincted by the render pipeline.
+
+        Returns
+        -------
+        jax.Array, shape (n_pixels,)
         """
         weights = project_lattice(
             self.lattice,
@@ -339,10 +311,7 @@ class _LatticeApertureInstrument(_BaseApertureInstrument):
 
 
 class EffectiveApertureInstrument(_LatticeApertureInstrument):
-    """Effective-aperture instrument with a fixed response table.
-
-    Frozen data: pixel geometry, bandpass, eval grid.
-    """
+    """Effective-aperture instrument with a fixed response table."""
 
     efficiency: Parameter
     pixel_efficiency: Parameter
@@ -363,16 +332,17 @@ class EffectiveApertureInstrument(_LatticeApertureInstrument):
     _geo_signature: tuple = eqx.field(static=True)
 
     def __init__(self, geo, bandpass, grid, values):
-        """
+        """Build the instrument.
+
         Parameters
         ----------
         geo : Geometry
         bandpass : callable
             Maps a wavelength Quantity to transmission.
-        grid : array (n_pixels, 2, grid_dim) or PixelLattice
+        grid : array-like, shape (n_pixels, 2, grid_dim), or PixelLattice
             Pixel sub-grid coordinates in radians, from which the shared
             response lattice is recovered; or that lattice directly.
-        values : array (n_pixels, grid_dim, grid_dim)
+        values : array-like, shape (n_pixels, grid_dim, grid_dim)
             Pixel response at the sub-grid points.
         """
         values = np.asarray(values)
@@ -385,20 +355,17 @@ class EffectiveApertureInstrument(_LatticeApertureInstrument):
 
     @property
     def weight(self):
-        """Simpson-integrated pixel weight. Shape [n_pix]."""
+        """Simpson-integrated pixel weight, shape ``(n_pix,)``."""
         return self._weight
 
     @property
     def centers(self):
-        """Pixel centres in the offset frame. Shape [n_pix, 2].
-
-        Precomputed: the table is frozen, so the first moment is too.
-        """
+        """Pixel centres in the offset frame, shape ``(n_pix, 2)``; precomputed."""
         return self._centers
 
     @property
     def pixel_values(self):
-        """Pixel response values. Shape [n_pix, grid_dim, grid_dim]."""
+        """Pixel response values, shape ``(n_pix, grid_dim, grid_dim)``."""
         return self._pixel_values
 
 
@@ -408,10 +375,8 @@ class EffectiveApertureInstrument(_LatticeApertureInstrument):
 class EffectiveApertureMisalignmentInstrument(_LatticeApertureInstrument):
     """Effective-aperture instrument with fittable mirror misalignment.
 
-    Stores a 5-D pixel response table parameterised by misalignment
-    ``(sigma_x, sigma_y)``, both trainable.  At render time the table is
-    interpolated bilinearly in sigma-space to give the effective
-    ``(npix, Nx, Ny)`` response, after which projection is as usual.
+    Holds a response table parameterised by a trainable ``(sigma_x,
+    sigma_y)``, interpolated bilinearly in sigma at render time.
     """
 
     efficiency: Parameter
@@ -453,18 +418,19 @@ class EffectiveApertureMisalignmentInstrument(_LatticeApertureInstrument):
         sigma_x_init=0.0,
         sigma_y_init=0.0,
     ):
-        """
+        """Build the instrument.
+
         Parameters
         ----------
         geo : Geometry
         bandpass : callable
             Maps a wavelength Quantity to transmission.
-        grid : array (n_pixels, 2, grid_dim) or PixelLattice
+        grid : array-like, shape (n_pixels, 2, grid_dim), or PixelLattice
             Pixel sub-grid coordinates in radians, from which the shared
             response lattice is recovered; or that lattice directly.
-        all_values : array (Nsigma_x, Nsigma_y, n_pixels, Nx, Ny)
+        all_values : array-like, shape (Nsigma_x, Nsigma_y, n_pixels, Nx, Ny)
             Pixel response for each sigma combination.
-        sigma_x_coords, sigma_y_coords : array
+        sigma_x_coords, sigma_y_coords : array-like
             Regularly-spaced misalignment grids the table is tabulated on.
         sigma_x_init, sigma_y_init : float
             Starting misalignment.
@@ -489,7 +455,7 @@ class EffectiveApertureMisalignmentInstrument(_LatticeApertureInstrument):
         self._sy_step = float(sigma_y_coords[1] - sigma_y_coords[0]) if self._nsy > 1 else 1.0
 
     def _interp(self, data):
-        """Interpolate ``data`` at the current (sigma_x, sigma_y)."""
+        """Interpolate ``data`` at the current ``(sigma_x, sigma_y)``."""
         return interpolate_regular_grid(
             self.sigma_x.value,
             self.sigma_y.value,
@@ -504,15 +470,15 @@ class EffectiveApertureMisalignmentInstrument(_LatticeApertureInstrument):
 
     @property
     def pixel_values(self):
-        """Pixel response at current (sigma_x, sigma_y). Shape [npix, Nx, Ny]."""
+        """Pixel response at the current misalignment, shape ``(npix, Nx, Ny)``."""
         return self._interp(self.all_pixel_values)
 
     @property
     def weight(self):
-        """Simpson-integrated pixel weight at current misalignment. Shape [npix]."""
+        """Simpson-integrated pixel weight at the current misalignment, shape ``(npix,)``."""
         return integrate_response(self.lattice, self.pixel_values)
 
     @property
     def centers(self):
-        """Pixel centres at the current misalignment. Shape [npix, 2]."""
+        """Pixel centres at the current misalignment, shape ``(npix, 2)``."""
         return response_centroid(self.lattice, self.pixel_values)

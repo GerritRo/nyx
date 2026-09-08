@@ -1,22 +1,42 @@
+"""Shared helpers: spectra, and render profiling."""
+
 from .profiler import profile_render, profile_scene
 from .spectra import (
     Bandpass,
+    ParametricSpectrum,
+    PassThroughSpectrum,
     PicklesTRDSAtlas1998,
     SolarSpectrumRieke2008,
     SpectralGrid,
+    SpectralModel,
+    StoredSpectrum,
+    bin_edges,
+    bin_widths,
+    blackbody_photon_flux,
+    color_grid_spectrum,
     create_color_grid,
     load_solar_flux,
     prepare_flux,
+    resample_flux,
 )
 
 __all__ = [
     "Bandpass",
+    "ParametricSpectrum",
+    "PassThroughSpectrum",
     "PicklesTRDSAtlas1998",
     "SolarSpectrumRieke2008",
     "SpectralGrid",
+    "SpectralModel",
+    "StoredSpectrum",
+    "bin_edges",
+    "blackbody_photon_flux",
+    "bin_widths",
+    "color_grid_spectrum",
     "create_color_grid",
     "load_solar_flux",
     "prepare_flux",
     "profile_render",
     "profile_scene",
+    "resample_flux",
 ]

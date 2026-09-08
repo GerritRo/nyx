@@ -10,11 +10,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from nyx.core.parameter import (
-    _is_param,
-    _ParametersTable,
+from nyx.core.parameter import is_parameter
+from nyx.core.paramtree import (
+    ParametersTable,
     dump_params,
     freeze_all,
+    hide_path_segments,
     n_trainable,
     parameters_table,
     set_parameters,
@@ -30,11 +31,11 @@ _SHAREABLE_FIELDS = ("atmosphere", "sources")
 def _signature(tree: Any) -> tuple[Any, tuple[Any, ...]]:
     """Return ``(treedef, leaf shapes)`` with Parameters treated as leaves.
 
-    Two subtrees with equal signatures can be swapped for one another with
+    Two subtrees with equal signatures are interchangeable under
     :func:`equinox.tree_at`.
     """
-    leaves, treedef = jax.tree_util.tree_flatten(tree, is_leaf=_is_param)
-    shapes = tuple(jnp.shape(leaf.factor) if _is_param(leaf) else None for leaf in leaves)
+    leaves, treedef = jax.tree_util.tree_flatten(tree, is_leaf=is_parameter)
+    shapes = tuple(jnp.shape(leaf.factor) if is_parameter(leaf) else None for leaf in leaves)
     return treedef, shapes
 
 
@@ -42,50 +43,33 @@ def _freeze_where[T](tree: T, predicate: Callable[[Any], bool]) -> T:
     """Return *tree* with every Parameter satisfying *predicate* frozen."""
 
     def at_leaf(x: Any) -> Any:
-        if _is_param(x) and predicate(x):
+        if is_parameter(x) and predicate(x):
             return x.freeze()
         return x
 
-    return jax.tree.map(at_leaf, tree, is_leaf=_is_param)
+    return jax.tree.map(at_leaf, tree, is_leaf=is_parameter)
+
+
+hide_path_segments("target_scenes", "canonical_instruments")
 
 
 class MultiTargetFit(eqx.Module):
-    """Joint fit over multiple observation targets with shared instruments.
+    """Joint fit over several targets with shared instruments.
 
-    Each target has its own :class:`~nyx.core.scene.Scene`.  Instruments
-    with the same name across scenes are linked: their shared (non-per-obs)
+    Instruments of the same name across scenes are linked: their non-per-obs
     Parameters live once in ``canonical_instruments`` and are injected into
-    every scene at render time, so JAX sums their gradients over all
-    targets.  Per-obs Parameters (``shift``, ``rotation``) stay on the
-    individual scenes, and so does per-target scene state (``atmosphere``,
-    ``sources``) unless it is listed in *share*.
-
-    When several scenes share an instrument name, the canonical shared
-    Parameter values come from the first scene to define that name; the
-    canonical values of the fields in *share* likewise come from the first
-    scene.
-
-    Fit it with a plain :class:`Optimizer`::
-
-        import optimistix as optx
-        mtf = MultiTargetFit({'A': scene_A, 'B': scene_B})
-        opt = Optimizer(loss_fn, optx.BFGS(rtol=1e-5, atol=1e-5))
-
-    Fit one common atmosphere over both targets instead of one per
-    target::
-
-        mtf = MultiTargetFit({'A': scene_A, 'B': scene_B}, share='atmosphere')
-        mtf.parameters_table()   # 'shared.atmosphere.Mie.aod_500', listed once
+    every scene at render time, so their gradients sum over targets.  Per-obs
+    Parameters and per-target scene state stay on the individual scenes
+    unless listed in *share*.  Canonical values come from the first scene to
+    define them.
 
     Parameters
     ----------
-    scenes : dict
-        ``{target_name: Scene}``, one pre-built Scene per target.
+    scenes : dict of str to Scene
+        One pre-built Scene per target.
     share : str or iterable of str, optional
-        Scene fields to link across all targets, from ``'atmosphere'`` and
-        ``'sources'``.  A linked field lives once in ``canonical_fields``
-        and is injected into every scene at render time, so its Parameters
-        are fitted jointly.  Linked fields must have the same structure and
+        Scene fields to link across targets, from ``'atmosphere'`` and
+        ``'sources'``.  A linked field must have the same structure and
         Parameter shapes in every scene.
     """
 
@@ -114,7 +98,7 @@ class MultiTargetFit(eqx.Module):
                     def structure(t: Any) -> Any:
                         return jax.tree_util.tree_structure(
                             t,
-                            is_leaf=_is_param,
+                            is_leaf=is_parameter,
                         )
 
                     if structure(canonical[name]) != structure(inst):
@@ -168,9 +152,7 @@ class MultiTargetFit(eqx.Module):
         self.target_scenes = target_scenes
 
     def _inject_shared(self, scene: Scene) -> Scene:
-        """Replace the shared Parameters in *scene* -- the non-per-obs ones
-        in its instruments, plus any linked field -- with their canonical
-        counterparts."""
+        """Replace *scene*'s shared Parameters with their canonical counterparts."""
 
         for field, canonical_field in self.canonical_fields.items():
             scene = eqx.tree_at(
@@ -180,7 +162,7 @@ class MultiTargetFit(eqx.Module):
             )
 
         def pick(a: Any, b: Any) -> Any:
-            return b if (_is_param(b) and not b.per_obs) else a
+            return b if (is_parameter(b) and not b.per_obs) else a
 
         for inst_name in scene.instruments:
             if inst_name not in self.canonical_instruments:
@@ -189,7 +171,7 @@ class MultiTargetFit(eqx.Module):
                 pick,
                 scene.instruments[inst_name],
                 self.canonical_instruments[inst_name],
-                is_leaf=_is_param,
+                is_leaf=is_parameter,
             )
 
             def _get_inst(s: Any, _n: str = inst_name) -> Any:
@@ -203,12 +185,13 @@ class MultiTargetFit(eqx.Module):
 
         Returns
         -------
-        dict of ``{target_name: {inst_name: jax.Array}}``
+        dict of str to dict of str to jax.Array
+            Keyed by target name, then instrument name.
         """
         return {t: self._inject_shared(s).render() for t, s in self.target_scenes.items()}
 
     def __repr__(self) -> str:
-        """Targets, shared instruments and linked fields -- not N whole Scenes."""
+        """Targets, shared instruments and linked fields, not N whole Scenes."""
         shared = ", ".join(self.canonical_fields) or "none"
         return (
             f"MultiTargetFit(targets: {', '.join(self.target_names) or '(none)'}; "
@@ -219,23 +202,35 @@ class MultiTargetFit(eqx.Module):
 
     @property
     def instrument_names(self) -> tuple[str, ...]:
-        """Names of the shared instruments."""
+        """Names of the shared instruments.
+
+        Returns
+        -------
+        tuple of str
+        """
         return tuple(self.canonical_instruments.keys())
 
     @property
     def target_names(self) -> tuple[str, ...]:
-        """Names of the fitted targets."""
+        """Names of the fitted targets.
+
+        Returns
+        -------
+        tuple of str
+        """
         return tuple(self.target_scenes.keys())
 
     def _display_tree(self) -> dict[str, Any]:
-        """Pytree view with frozen shadow Parameters removed: shared
-        instrument Parameters once, plus each target's own Parameters."""
+        """Pytree view without the frozen shadow Parameters.
+
+        Shared instrument Parameters appear once, alongside each target's own.
+        """
 
         def strip(tree: Any, drop: Callable[[Any], bool]) -> Any:
             def _pick(x: Any) -> Any:
-                return None if (_is_param(x) and drop(x)) else x
+                return None if (is_parameter(x) and drop(x)) else x
 
-            return jax.tree.map(_pick, tree, is_leaf=_is_param)
+            return jax.tree.map(_pick, tree, is_leaf=is_parameter)
 
         # Keyed exactly as the real tree is, so the names this produces are
         # the ones set_params, freeze and unfreeze accept:
@@ -259,33 +254,48 @@ class MultiTargetFit(eqx.Module):
         return display
 
     def set(self, path: str, value: Any) -> MultiTargetFit:
-        """Set one parameter by name; see :meth:`set_params`."""
+        """Set one parameter by name; see :meth:`set_params`.
+
+        Parameters
+        ----------
+        path : str
+        value : array-like
+
+        Returns
+        -------
+        MultiTargetFit
+        """
         return self.set_params({path: value})
 
     def set_params(self, params: dict[str, Any]) -> MultiTargetFit:
         """Set parameters by the names :meth:`parameters_table` prints.
 
-        The same spelling :func:`~nyx.core.parameter.freeze` takes, with
-        the same shell globbing, so the long chains this class would
-        otherwise need (``m.target_scenes[t].instruments['CT1'].shift``)
-        are not the only way in::
+        Parameters
+        ----------
+        params : dict of str to array-like
+            Names or glob patterns, as :func:`~nyx.core.paramtree.freeze`
+            takes.  A raw value is wrapped preserving the target's metadata.
 
-            mtf = mtf.set_params({'CT1.efficiency': 0.8, 'A.CT1.shift': shifts})
-            mtf = mtf.set('*.rotation', 0.0)   # every target
-
-        A raw value is auto-wrapped, preserving the target's ``scale``,
-        ``per_obs``, ``frozen`` and ``transform``.
+        Returns
+        -------
+        MultiTargetFit
         """
         return set_parameters(self, params)
 
-    def parameters_table(self) -> _ParametersTable:
-        """Return a table of every fitted Parameter.
+    def parameters_table(self) -> ParametersTable:
+        """Table of every fitted Parameter, shared instrument ones listed once.
 
-        Shared instrument Parameters are listed once; the frozen shadow
-        copies on the individual scenes are omitted.
+        Returns
+        -------
+        ParametersTable
         """
         return parameters_table(self._display_tree())
 
     def dump_params(self) -> dict[str, np.ndarray]:
-        """Return ``{path: ndarray}`` of every fitted Parameter's value."""
+        """Physical value of every fitted Parameter.
+
+        Returns
+        -------
+        dict of str to numpy.ndarray
+        """
         return dump_params(self._display_tree())

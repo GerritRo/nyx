@@ -1,16 +1,4 @@
-"""Adapting an iactrace effective-aperture table to a nyx instrument.
-
-A table can arrive two ways, and both end up in :func:`build_from_table`:
-
-- from a live scan (:func:`build_from_iactrace`), which needs iactrace
-  installed, and
-- from a ``.npz`` file iactrace wrote earlier
-  (:func:`load_aperture_table`), which needs nothing but numpy.
-
-The second is the normal path.  The scan is hours of Monte-Carlo ray
-tracing; nyx should read its result, not repeat it, and reading it must
-not require the ray tracer to be installed at all.
-"""
+"""Adapting an iactrace effective-aperture table to a nyx instrument."""
 
 from __future__ import annotations
 
@@ -44,27 +32,25 @@ _TABLE_ARRAYS = ("origin", "step", "offset", "values", "wavelengths", "spectral_
 class ApertureTable:
     """An iactrace effective-aperture table, read from a file.
 
-    Field-for-field what ``iactrace.analysis.EffectiveApertureTable``
-    carries, so :func:`build_from_table` cannot tell the two apart.  It
-    exists so that reading a saved table needs numpy and nothing else --
-    the ray tracer is only needed to *produce* one.
+    Field-for-field what ``iactrace.analysis.EffectiveApertureTable`` carries,
+    so :func:`build_from_table` accepts either; reading one needs numpy alone.
 
     Attributes
     ----------
-    origin : np.ndarray, shape (2,)
+    origin : numpy.ndarray, shape (2,)
         Field offset of lattice node ``(0, 0)``, ``[lon, lat]`` in radians.
-    step : np.ndarray, shape (2,)
+    step : numpy.ndarray, shape (2,)
         Node spacing along ``[lon, lat]``, in radians.
-    offset : np.ndarray, shape (n_pixels, 2)
+    offset : numpy.ndarray, shape (n_pixels, 2)
         Node index of each pixel's response window corner.
-    values : np.ndarray, shape (n_pixels, W, W)
+    values : numpy.ndarray, shape (n_pixels, W, W)
         Effective area at each node, in m^2.
     on_axis_area : float
-        Band-averaged on-axis effective area over all pixels, m^2; what
+        Band-averaged on-axis effective area over all pixels, in m^2; what
         :attr:`values` is normalised by.
-    wavelengths : np.ndarray, shape (K,)
+    wavelengths : numpy.ndarray, shape (K,)
         Bandpass grid, in nm.
-    spectral_area : np.ndarray, shape (K,)
+    spectral_area : numpy.ndarray, shape (K,)
         On-axis total effective area at each wavelength, in m^2.
     meta : dict
         Provenance recorded by the scan.
@@ -114,14 +100,12 @@ def load_aperture_table(path: str | Path) -> ApertureTable:
 
     Parameters
     ----------
-    path : str or Path
-        A file written by ``iactrace.io.save_aperture_table`` (or
-        ``EffectiveApertureTable.save``).
+    path : str or path-like
+        A file written by ``iactrace.io.save_aperture_table``.
 
     Returns
     -------
     ApertureTable
-        Ready for :func:`build_from_table`.
 
     Raises
     ------
@@ -146,7 +130,13 @@ def load_aperture_table(path: str | Path) -> ApertureTable:
 
 
 def build_from_iactrace(geo, telescope, camera, **scan_kwargs):
-    """Scan *telescope* + *camera* and adapt the result to an instrument."""
+    """Scan *telescope* and *camera*, and adapt the result to an instrument.
+
+    Returns
+    -------
+    dict
+        Keyword arguments for the instrument constructor.
+    """
     try:
         from iactrace.analysis import effective_aperture
     except ImportError as exc:  # pragma: no cover - exercised only without iactrace
@@ -158,9 +148,16 @@ def build_from_iactrace(geo, telescope, camera, **scan_kwargs):
 def build_from_table(geo, table):
     """Adapt an effective-aperture table to an instrument.
 
-    *table* is either an ``EffectiveApertureTable`` in hand, an
-    :class:`ApertureTable` read from disk, or a path to a saved one --
-    the last is read here, so no iactrace import is involved.
+    Parameters
+    ----------
+    table : EffectiveApertureTable, ApertureTable, str or path-like
+        A path is read here, so no iactrace import is involved.
+    geo : Geometry
+
+    Returns
+    -------
+    dict
+        Keyword arguments for the instrument constructor.
     """
     from nyx.instrument.effective_aperture import EffectiveApertureInstrument
 
@@ -193,16 +190,10 @@ _EDGE_TOL = 0.01
 
 
 def _warn_on_mismatch(geo, wavelengths, transmission, centers, stacklevel=4):
-    """Flag a Geometry that does not cover what the table describes.
+    """Warn about a Geometry that does not cover what the table describes.
 
-    Called both when a table is scanned and when an instrument is loaded
-    from disk -- the latter is the path users take every day, so the check
-    has to fire there too.
-
-    A grid wider than the table is only worth mentioning when the bandpass
-    is still responding at the edge.  Tables normally stop where the
-    instrument stops, so the common case costs nothing and warning about
-    it would just teach users to ignore the warning.
+    A grid wider than the table is flagged only where the bandpass is still
+    responding at its edge.
     """
     wvls = np.asarray(geo.wvls, dtype=float)
     trx = np.abs(np.asarray(transmission, dtype=float))

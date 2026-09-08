@@ -1,29 +1,4 @@
-"""Watch a fit converge, one solver step at a time.
-
-:meth:`~nyx.infer.Optimizer.run` hands the whole iteration to XLA
-and only the endpoint comes back.  :func:`record_fit` drives the same
-solver through :meth:`~nyx.infer.Optimizer.step` instead and
-evaluates a set of *probes* along the way, so the path the fit takes is
-available afterwards -- for a progress plot, a convergence animation, or
-just to see which parameter is the slow one::
-
-    trace = record_fit(
-        opt,
-        scene,
-        {
-            'shift': lambda s: s.instrument.shift.value,
-            'aod_500': lambda s: s.atmosphere.Mie.aod_500.value,
-        },
-        max_steps=200,
-    )
-    plt.semilogy(trace.steps, trace.loss)
-    plt.plot(trace.steps, trace['aod_500'])
-
-Stepping is only supported for minimiser solvers (``optx.BFGS``,
-``optx.LBFGS``, ...); a least-squares solver's state cannot be traced.
-A residuals function is fine either way -- it is reduced to
-``sum(r ** 2)`` exactly as :meth:`~nyx.infer.Optimizer.run` would.
-"""
+"""Watch a fit converge, one solver step at a time."""
 
 from __future__ import annotations
 
@@ -45,18 +20,14 @@ __all__ = ["FitTrace", "record_fit"]
 class FitTrace:
     """The path a fit took, sampled once per recorded solver step.
 
-    Returned by :func:`record_fit`; not usually built directly.
-
     Attributes
     ----------
-    steps : np.ndarray, shape (n_frames,)
-        Solver step index of each frame.  ``steps[0]`` is 0, the starting
-        model, and ``steps[-1]`` the final one.
-    loss : np.ndarray, shape (n_frames,)
-        Scalar loss at each frame, evaluated *before* that step was
-        applied.
-    history : dict of {str: np.ndarray}
-        One entry per probe, stacked over frames: each has shape
+    steps : numpy.ndarray, shape (n_frames,)
+        Solver step index of each frame; ``steps[0]`` is 0.
+    loss : numpy.ndarray, shape (n_frames,)
+        Scalar loss at each frame, evaluated before that step was applied.
+    history : dict of str to numpy.ndarray
+        One entry per probe, stacked over frames, each of shape
         ``(n_frames,) + probe_output_shape``.
     model : pytree
         The model at the last recorded frame.
@@ -75,11 +46,16 @@ class FitTrace:
         self.model = model
 
     def __len__(self) -> int:
-        """Number of recorded frames."""
+        """Number of recorded frames.
+
+    Returns
+    -------
+    int
+    """
         return int(self.steps.size)
 
     def __getitem__(self, name: str) -> np.ndarray:
-        """Recorded values of one probe, shape ``(n_frames,) + probe shape``."""
+        """Recorded values of one probe, of shape ``(n_frames,) + probe shape``."""
         return self.history[name]
 
     def __contains__(self, name: object) -> bool:
@@ -89,7 +65,12 @@ class FitTrace:
         return iter(self.history)
 
     def keys(self) -> Iterator[str]:
-        """Names of the recorded probes."""
+        """Names of the recorded probes.
+
+    Returns
+    -------
+    KeysView of str
+    """
         return iter(self.history)
 
     def __repr__(self) -> str:
@@ -114,59 +95,42 @@ def record_fit(
 ) -> FitTrace:
     """Step *opt* over *model*, recording the loss and the probes.
 
-    Every ``stride``-th step is recorded, always including step 0 (the
-    starting model) and the final one.  Each frame holds the model *as it
-    entered* that step, together with the loss there, so frame 0 is the
-    unfitted starting point.
+    Every ``stride``-th step is recorded, always including step 0 and the
+    final one.  Each frame holds the model as it entered that step, with the
+    loss there.
 
     Parameters
     ----------
-    opt : nyx.infer.Optimizer
-        Built around a *minimiser* solver, e.g. ``optx.LBFGS``.  A
-        least-squares solver raises, because its state cannot be jitted.
+    opt : Optimizer
+        Built around a minimiser solver, e.g. ``optx.LBFGS``; a
+        least-squares solver raises, its state being untraceable.
     model : pytree
         Starting model, typically a :class:`~nyx.core.scene.Scene`.
-    probes : mapping of {str: callable}, optional
-        ``(model) -> array`` functions evaluated at every recorded frame.
-        They are traced together under one :func:`equinox.filter_jit`, so
-        each must return a JAX array of a fixed shape.  A probe that
-        re-renders the scene costs one extra render per recorded frame.
+    probes : mapping of str to callable, optional
+        ``(model) -> array``, evaluated at every recorded frame.  Traced
+        together under one :func:`equinox.filter_jit`, so each must return a
+        JAX array of fixed shape.
     max_steps : int, optional
-        Number of solver steps to take (default 200).  Unlike
-        :meth:`~nyx.infer.Optimizer.run` this is not a ceiling on
-        an early-terminating loop: exactly this many steps are taken,
-        unless the loss diverges and *stop_on_diverged* is set.
+        Exact number of solver steps to take, not a ceiling.
     stride : int, optional
-        Record every ``stride``-th step (default: every one).
+        Record every ``stride``-th step.
     jit : bool, optional
-        Compile the solver step and the probes (default True).
+        Whether to compile the solver step and the probes.
     callback : callable, optional
         ``(step, loss, model) -> None``, called at every recorded frame.
-        Useful for a progress bar.
     stop_on_diverged : bool, optional
-        Stop as soon as the loss goes non-finite, warn, and return the
-        trace up to that point (default).  Continuing spends the remaining
-        steps on a model that is already NaN, and the recorded path is
-        exactly what shows *when* it diverged.  Set False to take all
-        ``max_steps`` regardless.
+        Whether to stop, warn and return early once the loss goes
+        non-finite.
 
     Returns
     -------
     FitTrace
-        The recorded path.  ``trace.model`` is the fitted model.
+        ``trace.model`` is the fitted model.
 
-    Examples
-    --------
-    ::
-
-        opt = Optimizer(residuals_fn, optx.LBFGS(rtol=1e-6, atol=1e-6))
-        trace = record_fit(
-            opt,
-            scene,
-            {'image': lambda s: s.render()['instrument'][0]},
-            max_steps=150,
-            callback=lambda i, loss, _: print(i, loss),
-        )
+    Raises
+    ------
+    TypeError
+        If *opt* uses a least-squares solver.
     """
     import optimistix as optx
 

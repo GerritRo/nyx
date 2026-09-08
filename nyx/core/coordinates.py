@@ -1,114 +1,11 @@
+"""JAX-differentiable alt-az <-> offset transforms for the render path."""
+
 from __future__ import annotations
 
-import astropy.units as u
-import healpy as hp
 import jax
 import jax.numpy as jnp
 import numpy as np
-from astropy.coordinates import (
-    BaseCoordinateFrame,
-    FunctionTransform,
-    GeocentricTrueEcliptic,
-    RepresentationMapping,
-    SkyCoord,
-    SphericalRepresentation,
-    TimeAttribute,
-    frame_transform_graph,
-    get_body,
-)
 from jax.typing import ArrayLike
-
-# HEALPix spatial index
-
-
-class HEALPixCatalog:
-    """Fast ra/dec cone search using HEALPix (nested ordering) spatial index."""
-
-    def __init__(self, ra: np.ndarray, dec: np.ndarray, nside: int = 256):
-        """
-        Parameters
-        ----------
-        ra, dec : array-like, degrees
-        nside : HEALPix nside (power of 2).
-        """
-        self.ra = np.asarray(ra, dtype=np.float64)
-        self.dec = np.asarray(dec, dtype=np.float64)
-        self.nside = nside
-
-        # Convert to theta/phi (colatitude/longitude in radians)
-        theta = np.radians(90.0 - self.dec)
-        phi = np.radians(self.ra)
-
-        # Assign each source to a nested pixel
-        pix = hp.ang2pix(nside, theta, phi, nest=True)
-
-        # Sort by pixel for contiguous slicing via searchsorted
-        order = np.argsort(pix)
-        self._sorted_pix = pix[order]
-        self._sorted_idx = order
-
-    def query(self, ra: float, dec: float, radius: float) -> np.ndarray:
-        """
-        Cone search.
-
-        Parameters
-        ----------
-        ra, dec : center in degrees
-        radius : search radius in degrees
-
-        Returns
-        -------
-        indices : array of integer indices into the original catalog
-        """
-        theta_c = np.radians(90.0 - dec)
-        phi_c = np.radians(ra)
-        vec = hp.ang2vec(theta_c, phi_c)
-        rad = np.radians(radius)
-
-        # Get all HEALPix pixels overlapping the disc
-        candidate_pix = hp.query_disc(self.nside, vec, rad, nest=True, inclusive=True)
-
-        # Gather candidate source indices (includes edge-pixel extras)
-        lefts = np.searchsorted(self._sorted_pix, candidate_pix, side="left")
-        rights = np.searchsorted(self._sorted_pix, candidate_pix, side="right")
-        idx_lists = [
-            self._sorted_idx[left:right]
-            for left, right in zip(lefts, rights, strict=False)
-            if left < right
-        ]
-        if not idx_lists:
-            return np.array([], dtype=np.int64)
-        return np.concatenate(idx_lists)
-
-
-# Healpix utility
-
-
-def rotate_healpix(
-    map_in: np.ndarray,
-    frame_in: BaseCoordinateFrame,
-    frame_out: BaseCoordinateFrame,
-    nside_out: int | None = None,
-) -> np.ndarray:
-    """Rotate a HEALPix map between any two astropy coordinate frames."""
-    nside = hp.get_nside(map_in)
-    nside_out = nside_out or nside
-    npix = hp.nside2npix(nside_out)
-
-    theta, phi = hp.pix2ang(nside_out, np.arange(npix))
-    lat = 90 - np.degrees(theta)
-    lon = np.degrees(phi)
-
-    coords_out = SkyCoord(lon * u.deg, lat * u.deg, frame=frame_out)
-    coords_in = coords_out.transform_to(frame_in)
-
-    theta_in = np.pi / 2 - coords_in.spherical.lat.rad
-    phi_in = coords_in.spherical.lon.rad
-
-    return hp.get_interp_val(map_in, theta_in, phi_in)
-
-
-# Handrolled implementation of SkyOffsetFrame compatible with jax
 
 
 def rotation_matrix_from_altaz(az_rad: float, alt_rad: float) -> np.ndarray:
@@ -135,8 +32,15 @@ def rotation_matrix_from_altaz(az_rad: float, alt_rad: float) -> np.ndarray:
 
 
 def safe_arcsin(z: jax.Array) -> jax.Array:
-    """
-    ``arcsin`` of a direction cosine, differentiable at ``|z| >= 1``.
+    """``arcsin`` of a direction cosine, differentiable at ``|z| >= 1``.
+
+    Parameters
+    ----------
+    z : jax.Array
+
+    Returns
+    -------
+    jax.Array
     """
     at_pole = jnp.abs(z) >= 1.0
     safe_z = jnp.where(at_pole, 0.0, z)
@@ -144,14 +48,14 @@ def safe_arcsin(z: jax.Array) -> jax.Array:
 
 
 def altaz_to_offset(az: ArrayLike, alt: ArrayLike, R: ArrayLike) -> tuple[jax.Array, jax.Array]:
-    """Transform AltAz (az, alt) to offset frame (lon, lat) using R.
+    """Transform AltAz (az, alt) to offset frame (lon, lat) using *R*.
 
     Parameters
     ----------
-    az, alt : array_like
+    az, alt : array-like
         AltAz coordinates in radians.
-    R : array_like, shape (3, 3)
-        Rotation matrix from rotation_matrix_from_altaz.
+    R : array-like, shape (3, 3)
+        Rotation matrix from :func:`rotation_matrix_from_altaz`.
 
     Returns
     -------
@@ -174,16 +78,14 @@ def altaz_to_offset(az: ArrayLike, alt: ArrayLike, R: ArrayLike) -> tuple[jax.Ar
 
 
 def offset_to_altaz(lon: ArrayLike, lat: ArrayLike, R: ArrayLike) -> tuple[jax.Array, jax.Array]:
-    """Transform offset frame (lon, lat) to AltAz (az, alt) using R.
-
-    Inverse of altaz_to_offset.
+    """Transform offset frame (lon, lat) to AltAz; inverse of :func:`altaz_to_offset`.
 
     Parameters
     ----------
-    lon, lat : array_like
+    lon, lat : array-like
         Offset frame coordinates in radians.
-    R : array_like, shape (3, 3)
-        Rotation matrix from rotation_matrix_from_altaz.
+    R : array-like, shape (3, 3)
+        Rotation matrix from :func:`rotation_matrix_from_altaz`.
 
     Returns
     -------
@@ -201,6 +103,10 @@ def offset_to_altaz(lon: ArrayLike, lat: ArrayLike, R: ArrayLike) -> tuple[jax.A
     R = jnp.asarray(R)
     p = jnp.einsum("ij,...j->...i", R.T, p_local)
 
+    # Deliberately not safe_arcsin: azimuth is undefined at the pole too, so
+    # the guard is on the horizontal component and shared by both angles.  It
+    # therefore fires for |pz| > 1-2eps, whereas safe_arcsin fires only at
+    # |z| >= 1 -- in float32 the two disagree by ~7e-4 rad near the pole.
     eps = jnp.finfo(p.dtype).eps
     horiz_sq = p[..., 0] ** 2 + p[..., 1] ** 2
     at_pole = horiz_sq < 4 * eps
@@ -234,52 +140,3 @@ def cos_angular_separation_jax(
     jax.Array
     """
     return jnp.sin(alt1) * jnp.sin(alt2) + jnp.cos(alt1) * jnp.cos(alt2) * jnp.cos(az1 - az2)
-
-
-# Custom astropy coordinates
-
-
-class SunRelativeEclipticFrame(BaseCoordinateFrame):
-    default_representation = SphericalRepresentation
-    obstime = TimeAttribute(default=None)
-
-    frame_specific_representation_info = {
-        SphericalRepresentation: [
-            RepresentationMapping("lon", "alpha"),
-            RepresentationMapping("lat", "beta"),
-            RepresentationMapping("distance", "distance"),
-        ]
-    }
-
-
-@frame_transform_graph.transform(
-    FunctionTransform, GeocentricTrueEcliptic, SunRelativeEclipticFrame
-)
-def gte_to_sunrel(
-    gte_coords: GeocentricTrueEcliptic, sunrel_frame: SunRelativeEclipticFrame
-) -> SunRelativeEclipticFrame:
-    obstime = gte_coords.obstime
-    if obstime is None:
-        raise ValueError("GeocentricTrueEcliptic coords must have obstime")
-    sun = get_body("sun", obstime)
-    sun_ecl = sun.transform_to(GeocentricTrueEcliptic(obstime=obstime))
-    alpha = (gte_coords.lon - sun_ecl.lon).wrap_at(180 * u.deg)
-    beta = gte_coords.lat
-    distance = gte_coords.distance if gte_coords.distance.unit != u.one else None
-    return SunRelativeEclipticFrame(alpha=alpha, beta=beta, distance=distance, obstime=obstime)
-
-
-@frame_transform_graph.transform(
-    FunctionTransform, SunRelativeEclipticFrame, GeocentricTrueEcliptic
-)
-def sunrel_to_gte(
-    sunrel_coords: SunRelativeEclipticFrame, gte_frame: GeocentricTrueEcliptic
-) -> GeocentricTrueEcliptic:
-    obstime = sunrel_coords.obstime
-    if obstime is None:
-        raise ValueError("SunRelativeEclipticFrame must have obstime")
-    sun_ecl = get_body("sun", obstime).transform_to(GeocentricTrueEcliptic(obstime=obstime))
-    lon = (sun_ecl.lon + sunrel_coords.alpha).wrap_at(360 * u.deg)
-    lat = sunrel_coords.beta
-    distance = sunrel_coords.distance if sunrel_coords.distance.unit != u.one else None
-    return GeocentricTrueEcliptic(lon=lon, lat=lat, distance=distance, obstime=obstime)

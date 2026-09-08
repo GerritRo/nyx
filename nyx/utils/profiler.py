@@ -1,3 +1,5 @@
+"""Device-memory profiling for a scene and its render pass."""
+
 from dataclasses import dataclass
 
 import jax
@@ -18,7 +20,12 @@ class MemoryEntry:
 
 
 def _collect_arrays(pytree) -> list[MemoryEntry]:
-    """Collect every JAX array leaf in *pytree* with its path."""
+    """Collect every JAX array leaf in *pytree* with its path.
+
+    Returns
+    -------
+    list of MemoryEntry
+    """
     entries = []
     for keypath, leaf in jax.tree_util.tree_leaves_with_path(pytree):
         if isinstance(leaf, jax.Array):
@@ -62,22 +69,18 @@ def _format_table(entries: list[MemoryEntry], top_n: int = 0) -> str:
 
 
 def profile_scene(scene, top_n: int = 30) -> dict[str, float]:
-    """Profile device memory usage of a Scene pytree.
-
-    Prints a breakdown of memory per component and returns a dict
-    mapping component paths to MB.
+    """Profile device memory usage of a Scene pytree, printing a breakdown.
 
     Parameters
     ----------
     scene : Scene
-        The scene to profile.
     top_n : int
-        Show only the top N largest arrays (0 = show all).
+        Show only the N largest arrays; 0 shows all.
 
     Returns
     -------
-    dict[str, float]
-        Mapping of path -> megabytes for every array in the scene.
+    dict of str to float
+        Megabytes per array path.
     """
     entries = _collect_arrays(scene)
     total_mb = sum(e.bytes for e in entries) / BYTES_PER_MB
@@ -107,7 +110,20 @@ def profile_scene(scene, top_n: int = 30) -> dict[str, float]:
 
 
 def profile_render(scene, instrument_idx: int = 0) -> dict:
-    """Profile device memory during a render pass."""
+    """Profile device memory during a render pass, printing a breakdown.
+
+    Parameters
+    ----------
+    scene : Scene
+    instrument_idx : int
+        Which instrument's output shape to report.
+
+    Returns
+    -------
+    dict
+        ``before_mb``, ``after_mb``, ``peak_mb``, ``render_mb`` and
+        ``result_shape``.
+    """
     backend = jax.default_backend()
     device = jax.devices()[0]
     before = _device_memory_used_mb()
@@ -146,7 +162,7 @@ def profile_render(scene, instrument_idx: int = 0) -> dict:
 
 
 def _device_memory_used_mb() -> float:
-    """Current device memory usage in MB (best-effort)."""
+    """Current device memory usage in MB, or 0.0 if unavailable."""
     try:
         stats = jax.devices()[0].memory_stats()
         if stats:
@@ -157,7 +173,7 @@ def _device_memory_used_mb() -> float:
 
 
 def _device_peak_memory_mb() -> float | None:
-    """Peak device memory usage in MB, or None if unavailable."""
+    """Peak device memory usage in MB, or ``None`` if unavailable."""
     try:
         stats = jax.devices()[0].memory_stats()
         if stats:

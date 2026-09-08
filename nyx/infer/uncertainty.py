@@ -14,7 +14,8 @@ import jax.numpy as jnp
 import numpy as np
 
 from nyx import NyxWarning
-from nyx.core.parameter import Parameter, _friendly_keypath, _is_param
+from nyx.core.parameter import Parameter, is_parameter
+from nyx.core.paramtree import friendly_keypath
 from nyx.infer._common import (
     _flat_parameter_names,
     _is_trainable,
@@ -25,8 +26,6 @@ from nyx.infer._common import (
 
 def _jacobian_columns(jvp_fn: Callable[[Any], Any], n: int, m: int, chunk: int) -> jax.Array:
     """Build ``J^T`` by pushing basis vectors through a linearised model.
-
-    Forward mode only.
 
     Parameters
     ----------
@@ -57,9 +56,7 @@ _GRAM_SLICE_BYTES = 64 * 1024 * 1024
 
 
 def _gram_matrix(jacobian_t: jax.Array) -> np.ndarray:
-    """
-    ``J^T J`` from ``J^T``, accumulated on the host in float64.
-    """
+    """``J^T J`` from ``J^T``, accumulated on the host in float64."""
     jt = np.asarray(jacobian_t)  # one device-to-host transfer, still float32
     n, m = jt.shape
     rows = int(np.clip(_GRAM_SLICE_BYTES // (8 * max(m, 1)), 1, n))
@@ -76,14 +73,19 @@ def _gram_matrix(jacobian_t: jax.Array) -> np.ndarray:
 
 
 def _null_space_parameters(diff: Any, null_vectors: np.ndarray, top: int = 3) -> str:
-    """Name the parameters carrying the discarded directions."""
+    """Name the parameters carrying the discarded directions.
+
+    Returns
+    -------
+    list of str
+    """
     if null_vectors.size == 0:
         return "(none)"
     weight = (null_vectors**2).sum(axis=1)
     shares, start = [], 0
     for path, leaf in jax.tree_util.tree_leaves_with_path(diff):
         stop = start + int(np.size(leaf))
-        shares.append((float(weight[start:stop].sum()), _friendly_keypath(path)))
+        shares.append((float(weight[start:stop].sum()), friendly_keypath(path)))
         start = stop
     total = sum(s for s, _ in shares) or 1.0
     shares.sort(reverse=True)
@@ -117,15 +119,16 @@ def _decompose(
 ) -> _Decomposition:
     """Linearise about *fitted* and diagonalise ``J^T J``.
 
-    Shared by :func:`parameter_errors` and :func:`parameter_correlation`,
-    which differ only in how much of the inverse they form.
+    Returns
+    -------
+    _Decomposition
     """
-    diff, static = eqx.partition(fitted, _is_trainable, is_leaf=_is_param)
+    diff, static = eqx.partition(fitted, _is_trainable, is_leaf=is_parameter)
     flat, unravel = fu.ravel_pytree(diff)
     n = flat.size
 
     def residuals_of_flat(x: jax.Array) -> jax.Array:
-        return fu.ravel_pytree(residuals_fn(eqx.combine(unravel(x), static, is_leaf=_is_param)))[0]
+        return fu.ravel_pytree(residuals_fn(eqx.combine(unravel(x), static, is_leaf=is_parameter)))[0]
 
     # Linearise once; jvp_fn is a pure linear operator, no retracing.
     r0, jvp_fn = jax.linearize(residuals_of_flat, flat)
@@ -174,7 +177,7 @@ def _decompose(
             f"(unbounded) uncertainty.  A common cause is the degeneracy "
             f"between a global `efficiency` and the overall scale of "
             f"`pixel_efficiency` (flatfield normalisation).  Freeze one of "
-            f"them via `nyx.core.parameter.freeze` to obtain a unique MLE "
+            f"them via `nyx.core.paramtree.freeze` to obtain a unique MLE "
             f"and meaningful σ for the rest.",
             NyxWarning,
             stacklevel=3,
@@ -199,37 +202,31 @@ def parameter_errors[T](
     reduced_chi2: bool = False,
     rcond: float | None = None,
 ) -> T:
-    """1-σ errors on every trainable Parameter, from the Gauss-Newton covariance.
-
-    Builds the Jacobian one block of columns at a time, forms ``J^T J``
-    in float64, and returns ``sqrt(diag(pinv(J^T J)))`` shaped like the
-    trainable subset of *fitted*.
+    """1-sigma errors on every trainable Parameter, from the Gauss-Newton covariance.
 
     Parameters
     ----------
     fitted : pytree
         Model to linearise about.
     residuals_fn : callable
-        ``(model) -> residuals``, pre-scaled by 1-σ uncertainties.
+        ``(model) -> residuals``.
     batch_size : int, optional
-        Jacobian columns per kernel launch.  Larger is not better: past a
-        few dozen the per-column intermediates stop fitting in cache and
-        throughput collapses.
+        Jacobian columns per kernel launch.  Larger is not better: past a few
+        dozen the per-column intermediates stop fitting in cache.
     reduced_chi2 : bool, optional
-        If False (default), assumes residuals are pre-scaled by 1-σ
-        uncertainties so ``cov = pinv(J^T J)``.  If True, applies the
-        ``(r^T r) / (m - n)`` factor.
+        Whether to apply the ``(r^T r) / (m - n)`` factor.  False assumes
+        residuals pre-scaled by 1-sigma uncertainties, so
+        ``cov = pinv(J^T J)``.
     rcond : float or None, optional
-        Cutoff for the pseudoinverse, relative to the largest singular
-        value of ``J``.  Defaults to ``n * eps`` of the Jacobian's dtype,
-        following :func:`numpy.linalg.pinv`: below that a direction is
-        indistinguishable from the rounding error in ``J`` itself, so it
-        is treated as unidentifiable and given zero error.
+        Pseudoinverse cutoff, relative to the largest singular value of
+        ``J``.  Defaults to ``n * eps`` of the Jacobian's dtype; a direction
+        below that is treated as unidentifiable and given zero error.
 
     Returns
     -------
     pytree
-        1-σ errors, shaped like the trainable subset of *fitted*.
+        ``sqrt(diag(pinv(J^T J)))``, shaped like the trainable subset of
+        *fitted*.
     """
     d = _decompose(fitted, residuals_fn, batch_size=batch_size, rcond=rcond)
     diff, unravel, r0, n = d.diff, d.unravel, d.residuals, d.n
@@ -255,7 +252,7 @@ def parameter_errors[T](
     # `unravel` rebuilds Parameters whose factors are sigmas in the space
     # the optimizer steps in, not physical units.
     def to_physical(fitted_p: Any, sigma_p: Any) -> Any:
-        if not (_is_param(fitted_p) and _is_param(sigma_p)):
+        if not (is_parameter(fitted_p) and is_parameter(sigma_p)):
             return sigma_p
         return Parameter.from_value(
             jnp.abs(fitted_p.dvalue_dfactor) * sigma_p.factor,
@@ -265,19 +262,17 @@ def parameter_errors[T](
             transform=fitted_p.transform,
         )
 
-    return jax.tree.map(to_physical, diff, sigma, is_leaf=_is_param)
+    return jax.tree.map(to_physical, diff, sigma, is_leaf=is_parameter)
 
 
 @dataclasses.dataclass(frozen=True)
 class ParameterCorrelation:
     """How a fit's parameters trade off against one another.
 
-    A degeneracy is the usual reason a fit wanders or returns implausible
-    error bars, and the covariance is where it shows.  ``names`` has one
-    entry per free scalar in the optimizer's flattening order, so array
-    parameters repeat; ``sigma`` is in that same stepping space.
-    ``n_unconstrained`` counts directions the pseudoinverse discarded --
-    non-zero means the data does not determine some combination at all.
+    ``names`` has one entry per free scalar in the optimizer's flattening
+    order, so array parameters repeat, and ``sigma`` is in that same stepping
+    space.  ``n_unconstrained`` counts the directions the pseudoinverse
+    discarded: non-zero means the data does not determine some combination.
     """
 
     names: list[str]
@@ -291,10 +286,18 @@ class ParameterCorrelation:
     ) -> list[tuple[str, str, float]]:
         """The *count* most correlated pairs of distinct parameters.
 
-        Per parameter, not per scalar: for an array parameter the
-        strongest correlation in the block is the one that matters, and a
-        thousand rows naming the same pair would bury it.  *threshold*
-        drops anything weaker.
+        Reported per parameter, not per scalar: an array parameter
+        contributes only the strongest correlation in its block.
+
+        Parameters
+        ----------
+        count : int
+        threshold : float
+            Drop pairs correlated more weakly than this.
+
+        Returns
+        -------
+        list of tuple
         """
         unique = list(dict.fromkeys(self.names))
         index = {name: np.flatnonzero(np.asarray(self.names) == name) for name in unique}
@@ -335,15 +338,22 @@ def parameter_correlation(
     batch_size: int = 8,
     rcond: float | None = None,
 ) -> ParameterCorrelation:
-    """Full covariance and correlation of the free parameters at *fitted*::
+    """Full covariance and correlation of the free parameters at *fitted*.
 
-        corr = parameter_correlation(fitted, residuals_fn)
-        corr.worst_pairs(threshold=0.9)  # anything nearly degenerate
+    Costs an ``n x n`` array, where :func:`parameter_errors` forms only the
+    diagonal.
 
-    :func:`parameter_errors` returns only the diagonal, which is all an
-    error bar needs; this forms the whole matrix, which shows *why* one is
-    large, and costs an ``n x n`` array to do it.  *residuals_fn*,
-    *batch_size* and *rcond* are as there.
+    Parameters
+    ----------
+    fitted : pytree
+    residuals_fn : callable
+    batch_size : int, optional
+    rcond : float or None, optional
+        As :func:`parameter_errors`.
+
+    Returns
+    -------
+    ParameterCorrelation
     """
     d = _decompose(fitted, residuals_fn, batch_size=batch_size, rcond=rcond)
     inv = np.where(d.keep, 1.0 / np.where(d.keep, d.eigvals, 1.0), 0.0)
@@ -361,29 +371,25 @@ def parameter_correlation(
 
 
 def rescale_from_errors[T](fitted: T, errs: T) -> T:
-    """
-    Rescale every trainable Parameter using error estimates as new scales.
-    This normalises parameter magnitudes across physically disparate
-    quantities and can improve convergence in a subsequent fit.
+    """Rescale every trainable Parameter, using its error estimate as the new scale.
 
     Parameters
     ----------
     fitted : pytree
-        Model as returned by :meth:`Optimizer.run`.
     errs : pytree
-        Error estimates as returned by :meth:`Optimizer.errors` or
-        :func:`parameter_errors`.  Must share the trainable-parameter
-        structure of *fitted*.
+        As returned by :func:`parameter_errors`; must share the
+        trainable-parameter structure of *fitted*.
+
     Returns
     -------
     pytree
         Copy of *fitted* with every trainable Parameter rescaled.
     """
-    diff, static = eqx.partition(fitted, _is_trainable, is_leaf=_is_param)
+    diff, static = eqx.partition(fitted, _is_trainable, is_leaf=is_parameter)
     _warn_non_finite(_non_finite_parameters(errs), "the error estimate")
 
     def rescale_leaf(param: Any, err: Any) -> Any:
-        if not (_is_param(param) and _is_param(err)):
+        if not (is_parameter(param) and is_parameter(err)):
             return param
         if param.transform is not None:
             return param
@@ -397,5 +403,5 @@ def rescale_from_errors[T](fitted: T, errs: T) -> T:
             frozen=param.frozen,
         )
 
-    rescaled = jax.tree.map(rescale_leaf, diff, errs, is_leaf=_is_param)
-    return eqx.combine(rescaled, static, is_leaf=_is_param)
+    rescaled = jax.tree.map(rescale_leaf, diff, errs, is_leaf=is_parameter)
+    return eqx.combine(rescaled, static, is_leaf=is_parameter)

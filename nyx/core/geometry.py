@@ -1,3 +1,5 @@
+"""The resolution and grid configuration every component is built against."""
+
 from __future__ import annotations
 
 import hashlib
@@ -53,7 +55,6 @@ class Geometry:
         if not self.fov > 0:
             raise ValueError(f"fov must be positive, got {float(self.fov)} rad")
 
-        # HEALPix hemisphere grid
         npix = hp.nside2npix(nside)
         theta, phi = hp.pix2ang(nside, np.arange(npix))
         self.mask = theta < np.pi / 2
@@ -71,24 +72,15 @@ class Geometry:
 
     @property
     def signature(self) -> tuple[Any, ...]:
-        """Exact identity of this geometry, compared by
-        :func:`check_shared_geometry`.
+        """Exact identity of this geometry, with the wavelength grid hashed.
 
-        The wavelength grid is hashed rather than stored, keeping the
-        signature small while still separating two grids that share their
-        endpoints and length.
+        Returns
+        -------
+        tuple
         """
         wvls = np.asarray(self.wvls, dtype=np.float64)
         digest = hashlib.blake2b(wvls.tobytes(), digest_size=8).hexdigest()
         return (int(self.nside), int(self.ngrid), float(self.fov), int(wvls.size), digest)
-
-    def __eq__(self, other: object) -> bool:
-        if not isinstance(other, Geometry):
-            return NotImplemented
-        return self.signature == other.signature
-
-    def __hash__(self) -> int:
-        return hash(self.signature)
 
     def __repr__(self) -> str:
         wvls = np.asarray(self.wvls)
@@ -101,7 +93,7 @@ class Geometry:
 
 
 def _describe(signature: tuple[Any, ...]) -> str:
-    """Readable form of a :attr:`~nyx.core.geometry.Geometry.signature`."""
+    """Readable form of a :attr:`Geometry.signature`."""
     nside, ngrid, fov, n_wvl, digest = signature
     return (
         f"nside={nside}, ngrid={ngrid}, fov={np.degrees(fov):.4g} deg, "
@@ -117,10 +109,17 @@ def check_shared_geometry(
 ) -> None:
     """Raise unless every component was built against the same Geometry.
 
-    Components cache geometry-derived constants at construction, so
-    mixing geometries passes every shape check and silently computes the
-    wrong number.  A component recording no signature is skipped: an
-    unchecked component is not an error.
+    Parameters
+    ----------
+    obs_list : dict of str to Observation
+    atmosphere : AtmosphereModel
+    instruments : dict of str to InstrumentModel
+    sources : dict of str to SkySource
+
+    Raises
+    ------
+    ValueError
+        If two components report different geometry signatures.
     """
     labelled: list[tuple[str, tuple[Any, ...]]] = [
         (f"observation {name!r}", obs.geom.signature) for name, obs in obs_list.items()
@@ -131,6 +130,7 @@ def check_shared_geometry(
     ]
     labelled += [(f"source {n!r}", getattr(s, "_geo_signature", None)) for n, s in sources.items()]
 
+    # A component recording no signature is unchecked, not an error.
     known = [(label, sig) for label, sig in labelled if sig is not None]
     _, reference = known[0]
     odd = [(label, sig) for label, sig in known if sig != reference]

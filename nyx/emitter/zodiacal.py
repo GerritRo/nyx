@@ -1,14 +1,17 @@
+"""Zodiacal light: sunlight scattered by interplanetary dust, after Leinert et al. (1998)."""
+
 import astropy.units as u
 import jax.numpy as jnp
 import numpy as np
 from jax.scipy.interpolate import RegularGridInterpolator
 
 from nyx import ASSETS_PATH
-from nyx.core.protocols import SourceObsData
-from nyx.core.spectral import ParametricSpectrum, SpectralModel
+from nyx.core.records import SourceObsData
 from nyx.core.units import energy_flux_to_photon_flux
-from nyx.emitter._base import BaseEmitter
-from nyx.utils.spectra import load_solar_flux
+from nyx.emitter.base import Emitter
+from nyx.utils.spectra import ParametricSpectrum, SpectralModel, load_solar_flux
+
+__all__ = ["ZodiacalLight"]
 
 # Wavelength the Leinert (1998) colour correction is normalised at, in nm.
 _REFERENCE_WAVELENGTH = 500.0
@@ -22,26 +25,25 @@ _SLOPE_NEAR = (1.2, 0.8)
 _SLOPE_FAR = (0.9, 0.6)
 
 
+# ---- internals
+
+
 def _leinert_weights(alpha, beta, leinert_points, leinert_values, wvls):
-    """Compute Leinert zodiacal light weights with color correction.
+    """Leinert zodiacal light weights, with colour correction.
 
     Parameters
     ----------
-    alpha : array
-        Ecliptic longitude in radians, shape (nsky,).
-    beta : array
-        Ecliptic latitude in radians, shape (nsky,).
-    leinert_points : tuple
-        (alpha_grid, beta_grid) as arrays in radians.
-    leinert_values : array
-        Leinert table values, shape (n_alpha, n_beta).
-    wvls : array
-        Wavelengths in nm, shape (n_wvl,).
+    alpha, beta : numpy.ndarray, shape (nsky,)
+        Ecliptic longitude and latitude in radians.
+    leinert_points : tuple of numpy.ndarray
+        ``(alpha_grid, beta_grid)`` in radians.
+    leinert_values : numpy.ndarray, shape (n_alpha, n_beta)
+    wvls : numpy.ndarray, shape (n_wvl,)
+        Wavelengths in nm.
 
     Returns
     -------
-    array
-        Weight array, shape (nsky, n_wvl).
+    numpy.ndarray, shape (nsky, n_wvl)
     """
     # Fold alpha into [0, pi] and take abs(beta) for symmetry
     alpha_folded = np.abs((alpha + np.pi) % (2 * np.pi) - np.pi)
@@ -84,7 +86,17 @@ def _leinert_weights(alpha, beta, leinert_points, leinert_values, wvls):
 
 
 def _zodi_model_fn(base_spectra):
-    """Multiply Leinert weights x color correction by the reference spectrum."""
+    """Multiply the Leinert weights and colour correction by a reference spectrum.
+
+    Parameters
+    ----------
+    base_spectra : jax.Array, shape (n_wvl,)
+
+    Returns
+    -------
+    callable
+        ``(params, conditions) -> radiance``.
+    """
 
     def fn(_params, conditions):
         if conditions is None:
@@ -94,20 +106,24 @@ def _zodi_model_fn(base_spectra):
     return fn
 
 
-class ZodiacalLight(BaseEmitter):
-    """Zodiacal light source with Leinert spatial model.
-
-    No trainable parameters.
+class ZodiacalLight(Emitter):
+    """Zodiacal light with the Leinert spatial model.
 
     Parameters
     ----------
     geo : Geometry
-        Resolution configuration (provides wavelengths).
+        Resolution configuration.
     spectral_model : SpectralModel
-        Spectral model for the zodiacal light spectrum.
+    brightness : array-like or None
+        Fittable overall amplitude; see :class:`~nyx.emitter.base.Emitter`.
+        This emitter has no other free parameter, so it is the only way to
+        fit the zodiacal level.
+    transform : str or None
+        Domain of *brightness*.
     """
 
-    def __init__(self, geo, spectral_model: SpectralModel):
+    def __init__(self, geo, spectral_model: SpectralModel, brightness=None, transform="log"):
+        super().__init__(geo, spectral_model, brightness, transform)
         wvls = geo.wvls
 
         # Load Leinert table
@@ -119,10 +135,8 @@ class ZodiacalLight(BaseEmitter):
         self._leinert_values = zod[1:, 1:]
 
         self._wvls = wvls
-        self._spectral_model = spectral_model
-        self._geo_signature = geo.signature
 
-    def prepare(self, obs) -> SourceObsData:
+    def _prepare(self, obs) -> SourceObsData:
         """Precompute Leinert weights per HEALPix pixel per observation.
 
         Parameters
@@ -132,7 +146,7 @@ class ZodiacalLight(BaseEmitter):
         Returns
         -------
         SourceObsData
-            With Leinert weights x color correction as diffuse_conditions.
+            ``diffuse_conditions`` holds the weights times colour correction.
         """
         diffuse_list = []
         for i in range(obs.nobs):
@@ -153,17 +167,22 @@ class ZodiacalLight(BaseEmitter):
 
         return SourceObsData(
             diffuse_conditions=jnp.stack(diffuse_list),  # (nobs, nsky, n_wvl)
-            per_obs=("diffuse_conditions",),
+            per_obs_fields=("diffuse_conditions",),
         )
 
     @classmethod
-    def from_leinert1998(cls, geo) -> "ZodiacalLight":
-        """Zodiacal light with solar spectrum (Leinert et al. 1998).
+    def from_leinert1998(cls, geo, **kwargs) -> "ZodiacalLight":
+        """Zodiacal light with a solar spectrum, after Leinert et al. (1998).
 
         Parameters
         ----------
         geo : Geometry
-            Resolution configuration (provides wavelengths).
+        **kwargs
+            Passed to :class:`ZodiacalLight`, e.g. ``brightness``.
+
+        Returns
+        -------
+        ZodiacalLight
         """
         wvls = geo.wvls
 
@@ -177,4 +196,4 @@ class ZodiacalLight(BaseEmitter):
             params=None,
             _model_fn=_zodi_model_fn(base_spectra),
         )
-        return cls(geo, spectral_model)
+        return cls(geo, spectral_model, **kwargs)

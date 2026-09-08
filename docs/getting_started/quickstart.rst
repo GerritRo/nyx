@@ -142,7 +142,8 @@ the scene pytree) to choose what is trained.
 .. code-block:: python
 
    import optimistix as optx
-   from nyx.core import Optimizer, freeze_all, unfreeze
+   from nyx.core import freeze_all, unfreeze
+   from nyx.infer import Optimizer
 
    # Start from everything frozen, then unfreeze what you want to fit.
    # The selector returns the Parameter to train, e.g. the instrument
@@ -161,7 +162,7 @@ the scene pytree) to choose what is trained.
    errors = opt.errors(fitted)
 
 For jointly fitting several targets/observations, see
-:class:`~nyx.core.MultiTargetFit`.
+:class:`~nyx.infer.multitarget.MultiTargetFit`.
 
 Saving and Loading a Fit
 ------------------------

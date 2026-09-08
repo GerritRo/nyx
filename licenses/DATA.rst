@@ -144,7 +144,7 @@ STScI solsys solar spectrum (Rieke 2008)
 
 STScI CALSPEC Vega spectrum
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
-:Source: STScI CALSPEC database, ``alpha_lyr_stis_011.fits``
+:Source: STScI CALSPEC database, ``alpha_lyr_stis_012.fits``
    (https://www.stsci.edu/hst/instrumentation/reference-data-for-calibration-and-tools/astronomical-catalogs/calspec)
 :Used by: the ``Bandpass`` zero-point code
 :Description: Composite absolute-flux SED of Vega (α Lyr) on the HST/CALSPEC

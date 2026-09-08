@@ -11,7 +11,8 @@ import jax
 import numpy as np
 import optimistix as optx
 
-from nyx.core.parameter import _is_param, freeze, n_trainable, set_parameters
+from nyx.core.parameter import is_parameter
+from nyx.core.paramtree import freeze, n_trainable, set_parameters
 from nyx.infer._common import (
     _is_trainable,
     _non_finite_parameters,
@@ -25,7 +26,9 @@ from nyx.infer.uncertainty import parameter_errors
 def _result_text(sol: optx.Solution[Any, Any]) -> str:
     """Solver status as a sentence.
 
-    ``str(sol.result)`` renders as ``optimistix._solution.RESULTS<>``.
+    Returns
+    -------
+    str
     """
     message = str(optx.RESULTS[sol.result]).strip()
     return message or "converged"
@@ -35,12 +38,10 @@ def _result_text(sol: optx.Solution[Any, Any]) -> str:
 class FitSummary:
     """How a fit came out.
 
-    ``reduced_chi2`` is the number to read: around 1 means the model fits
-    to within the stated uncertainties.  It needs the residual and free
-    parameter counts together, so both are taken from the model rather
-    than re-derived at the call site.  ``n_data``, ``dof`` and
-    ``reduced_chi2`` are ``None`` for a scalar loss, which exposes no
-    residual count; ``result`` and ``steps`` need a Solution.
+    ``reduced_chi2`` near 1 means the model fits to within the stated
+    uncertainties.  It, ``n_data`` and ``dof`` are ``None`` for a scalar
+    loss, which exposes no residual count; ``result`` and ``steps`` need a
+    Solution.
     """
 
     chi2: float
@@ -69,56 +70,24 @@ class FitSummary:
 class Optimizer:
     """Fit any pytree of Parameters with a minimiser or least-squares solver.
 
-    Trains every non-frozen :class:`Parameter` reachable from *model*.
-    Per-obs parameters receive independent per-observation gradients;
-    global parameters receive gradients summed over observations.
-
-    *fn* depends on the solver type:
-
-    * minimiser (``optx.BFGS`` and similar): *fn* returns a scalar loss.
-    * least-squares solver (``optx.LevenbergMarquardt``, ``GaussNewton``,
-      ``Dogleg``): *fn* returns a residual array or pytree of arrays.
-
-    A least-squares solver is usually fastest for chi-squared losses
-    ``sum(((pred - target) / err) ** 2)``. A non-scalar *fn* passed to a
-    minimiser is auto-wrapped with sum-of-squares; a scalar *fn* passed
-    to a least-squares solver raises ``TypeError``.
+    Trains every non-frozen :class:`~nyx.core.parameter.Parameter` reachable
+    from *model*.  Per-obs parameters get independent per-observation
+    gradients, global ones the sum over observations.
 
     Parameters
     ----------
     fn : callable
         ``(model) -> scalar`` for a minimiser, or ``(model) -> residuals``
-        for a least-squares solver.
+        for a least-squares solver.  A non-scalar *fn* given to a minimiser
+        is wrapped with sum-of-squares.
     solver : optimistix.AbstractIterativeSolver
-        A minimiser or a least-squares solver, e.g.
-        ``optx.LevenbergMarquardt(rtol=1e-5, atol=1e-5)``.
+        E.g. ``optx.BFGS`` or ``optx.LevenbergMarquardt``; the latter is
+        usually fastest for a chi-squared loss.
 
-    Examples
-    --------
-    Least-squares fit, run to convergence::
-
-        import optimistix as optx
-
-        def residuals(scene):
-            preds = scene.render()['instrument']
-            return (preds - targets) / (targets * 0.1)
-
-        opt = Optimizer(residuals, optx.LevenbergMarquardt(rtol=1e-5, atol=1e-5))
-        scene, sol = opt.run(scene, max_steps=256)
-
-    Manual stepping, for progress reporting (minimiser solvers only;
-    least-squares solver state cannot be jitted).  Wrap the step with
-    :func:`equinox.filter_jit` rather than :func:`jax.jit`: some solver
-    states (``optx.LBFGS``) carry non-array leaves::
-
-        opt = Optimizer(loss_fn, optx.BFGS(rtol=1e-5, atol=1e-5))
-        state = opt.init_state(scene)
-        step = eqx.filter_jit(opt.step)
-        for _ in range(200):
-            scene, loss, state = step(scene, state)
-
-    Or let :func:`nyx.infer.convergence.record_fit` drive the same loop
-    and record the path the fit takes.
+    Raises
+    ------
+    TypeError
+        If a scalar *fn* is paired with a least-squares solver.
     """
 
     def __init__(self, fn: Callable[[Any], Any], solver: Any) -> None:
@@ -129,7 +98,13 @@ class Optimizer:
         self._inner: Callable[..., Any] | None = None  # built once; see _make_inner
 
     def _check_fn(self, model: Any) -> None:
-        """Probe fn output shape and cache _fn_is_scalar. Call with a concrete model."""
+        """Probe *fn*'s output shape and cache ``_fn_is_scalar``.
+
+    Raises
+    ------
+    TypeError
+        If a scalar *fn* is paired with a least-squares solver.
+    """
         if self._fn_is_scalar is not None:
             return
         probe = jax.eval_shape(lambda: self._fn_user(model))
@@ -144,7 +119,7 @@ class Optimizer:
 
     def _make_inner(self, model: Any) -> tuple[Callable[..., Any], Any, Any]:
         """Partition *model* and return the inner fn for optimistix."""
-        diff, static = eqx.partition(model, _is_trainable, is_leaf=_is_param)
+        diff, static = eqx.partition(model, _is_trainable, is_leaf=is_parameter)
         if self._inner is None:
             fn_user = self._fn_user
             user_fn: Callable[[Any], Any]
@@ -156,22 +131,21 @@ class Optimizer:
                 user_fn = fn_user
 
             def inner(diff: Any, args: Any) -> tuple[Any, None]:
-                return user_fn(eqx.combine(diff, args, is_leaf=_is_param)), None
+                return user_fn(eqx.combine(diff, args, is_leaf=is_parameter)), None
 
             self._inner = inner
         return self._inner, diff, static
 
     def init_state(self, model: Any) -> Any:
-        """Compute the initial solver state for manual stepping.
+        """Initial solver state for manual stepping.
 
         Parameters
         ----------
         model : pytree
-            The starting model.
 
         Returns
         -------
-        state : optimistix solver state
+        optimistix solver state
             Pass as *state* to the first :meth:`step` call.
         """
         self._check_fn(model)
@@ -183,18 +157,15 @@ class Optimizer:
     def loss(self, model: Any) -> jax.Array:
         """Scalar loss at *model*, without taking a solver step.
 
-        On the least-squares path -- and for a residuals *fn* handed to a
-        minimiser -- this is ``sum(r ** 2)``.
+        For a residuals *fn* this is ``sum(r ** 2)``.
 
         Parameters
         ----------
         model : pytree
-            Model to evaluate.
 
         Returns
         -------
         jax.Array
-            Scalar loss.
         """
         if self._fn_is_scalar is None:
             self._check_fn(model)
@@ -208,53 +179,42 @@ class Optimizer:
         Parameters
         ----------
         model : pytree
-            Current model.
         state : optimistix solver state
-            From :meth:`init_state` or a previous :meth:`step` call.
+            From :meth:`init_state` or a previous :meth:`step`.
 
         Returns
         -------
         model : pytree
             Updated model.
         loss : jax.Array
-            Scalar loss at *model* before the step was applied. On the
-            least-squares path this is ``sum(r ** 2)``.
+            Scalar loss at *model* before the step was applied.
         state : optimistix solver state
-            Updated solver state.
         """
         loss = self.loss(model)
         inner, diff, static = self._make_inner(model)
         new_diff, new_state, _ = self._solver.step(inner, diff, static, {}, state, frozenset())
-        new_model = eqx.combine(new_diff, static, is_leaf=_is_param)
+        new_model = eqx.combine(new_diff, static, is_leaf=is_parameter)
         return new_model, loss, new_state
 
     def run[T](
         self, model: T, *, max_steps: int = 256, throw: bool = True
     ) -> tuple[T, optx.Solution[Any, Any]]:
-        """Run the solver to convergence.
-
-        Dispatches to :func:`optimistix.least_squares` or
-        :func:`optimistix.minimise` depending on the solver type. Both
-        wrap the iteration in ``lax.while_loop``, so the whole
-        convergence compiles once and runs inside XLA.
+        """Run the solver to convergence, inside a single compiled loop.
 
         Parameters
         ----------
         model : pytree
-            Starting model.
         max_steps : int, optional
-            Maximum solver iterations (default 256).
+            Maximum solver iterations.
         throw : bool, optional
-            If True, raise on non-successful termination (default).
-            Set False to inspect ``sol.result`` manually.
+            Whether to raise on non-successful termination; False leaves
+            ``sol.result`` to inspect.
 
         Returns
         -------
         model : pytree
             Fitted model.
         sol : optimistix.Solution
-            The full solver solution (``sol.value`` is the trainable
-            pytree, ``sol.result`` the status, ``sol.stats`` the counts).
         """
         self._check_fn(model)
         inner, diff, static = self._make_inner(model)
@@ -269,18 +229,21 @@ class Optimizer:
             throw=throw,
         )
         _warn_non_finite(_non_finite_parameters(sol.value), "the fitted model")
-        fitted = eqx.combine(sol.value, static, is_leaf=_is_param)
+        fitted = eqx.combine(sol.value, static, is_leaf=is_parameter)
         return fitted, sol
 
     def summary(self, model: Any, sol: optx.Solution[Any, Any] | None = None) -> FitSummary:
-        """Goodness of fit at *model*::
+        """Goodness of fit at *model*.
 
-            fitted, sol = opt.run(scene)
-            print(opt.summary(fitted, sol))
+        Parameters
+        ----------
+        model : pytree
+        sol : optimistix.Solution, optional
+            Adds the solver's status and step count.
 
-        Counting from the model means the reduced chi-squared cannot
-        drift from the parameters actually fitted.  *sol* adds the
-        solver's status and step count.
+        Returns
+        -------
+        FitSummary
         """
         self._check_fn(model)
         chi2 = float(self.loss(model))
@@ -313,16 +276,23 @@ class Optimizer:
         """Profile likelihood over one or two parameters.
 
         At each grid point the scanned parameters are held and the rest
-        refitted, projecting the nuisances out rather than fixing them at
-        their global best.  The grid is indexed in the order given --
-        ``chi2[i, j]`` is at ``axes[0][i], axes[1][j]``::
+        refitted.  The grid is indexed in the order given, so ``chi2[i, j]``
+        is at ``axes[0][i], axes[1][j]``.
 
-            grid = opt.profile(fitted, {'instrument.sigma_x': sx,
-                                        'instrument.sigma_y': sy})
-            plt.contour(*grid.axes[::-1], grid.delta_chi2.T, levels=grid.levels)
+        Parameters
+        ----------
+        model : pytree
+            With its nuisance parameters already unfrozen.
+        scan : dict of str to array-like
+            One or two parameter names, each with the values to scan.
+        max_steps : int, optional
+            Maximum solver iterations per refit.
+        callback : callable, optional
+            ``(index, point, chi2) -> None``, for a progress bar.
 
-        *model* needs its nuisances already unfrozen.  *callback* is
-        ``(index, point, chi2) -> None``, for a progress bar.
+        Returns
+        -------
+        ProfileGrid
         """
         if not 1 <= len(scan) <= 2:
             raise ValueError(f"scan one or two parameters, got {len(scan)}")
@@ -349,32 +319,27 @@ class Optimizer:
         reduced_chi2: bool = False,
         rcond: float | None = None,
     ) -> T:
-        """1-σ errors on every trainable Parameter at *fitted*.
+        """1-sigma errors on every trainable Parameter at *fitted*.
 
-        Returns ``sqrt(diag(pinv(JᵀJ)))`` as a pytree with the same
-        structure as the trainable subset of *fitted*.
-
-        Only valid when *fn* returns residuals.  Does not require
-        :meth:`run` first: errors can be taken at any model.
+        Valid only when *fn* returns residuals; :meth:`run` need not have
+        been called.
 
         Parameters
         ----------
         fitted : pytree
-            Model returned by :meth:`run`.
         batch_size : int, optional
-            Jacobian columns evaluated per kernel launch.  Larger is not
-            better; see :func:`parameter_errors`.
+            Jacobian columns evaluated per kernel launch.
         reduced_chi2 : bool, optional
-            If False (default), assumes residuals are pre-scaled by 1-σ
-            uncertainties so ``cov = pinv(J^T J)``.  If True, applies
-            the ``(r^T r) / (m - n)`` factor so errors reflect the
-            spread consistent with the data.
+            Whether to apply the ``(r^T r) / (m - n)`` factor.  False assumes
+            residuals pre-scaled by 1-sigma uncertainties.
         rcond : float or None, optional
-            Cutoff for the pseudoinverse, relative to the largest
-            singular value of ``J``.  See :func:`parameter_errors`.
+            Pseudoinverse cutoff, relative to the largest singular value.
 
-        See :func:`parameter_errors` for the standalone form and full
-        docstring.
+        Returns
+        -------
+        pytree
+            ``sqrt(diag(pinv(J^T J)))``, shaped like the trainable subset of
+            *fitted*.
         """
         self._check_fn(fitted)
         if self._fn_is_scalar:

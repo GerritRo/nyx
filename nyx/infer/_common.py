@@ -1,9 +1,4 @@
-"""Shared internals of the fitting modules.
-
-optimistix wraps its iteration in ``lax.while_loop``, so a diverging fit
-cannot raise from inside; the non-finite helpers here name the parameters
-involved instead.
-"""
+"""Shared internals of the fitting modules."""
 
 from __future__ import annotations
 
@@ -15,7 +10,8 @@ import jax.numpy as jnp
 import numpy as np
 
 from nyx import NyxWarning
-from nyx.core.parameter import Parameter, _friendly_keypath, _friendly_path, _iter_parameters
+from nyx.core.parameter import Parameter
+from nyx.core.paramtree import friendly_keypath, friendly_path, iter_parameters
 
 
 def _is_trainable(x: Any) -> bool:
@@ -34,15 +30,15 @@ def _flat_parameter_names(diff: Any) -> list[str]:
     """One friendly name per flat parameter slot, for reporting by index."""
     names: list[str] = []
     for path, leaf in jax.tree_util.tree_leaves_with_path(diff):
-        names += [_friendly_keypath(path)] * int(np.size(leaf))
+        names += [friendly_keypath(path)] * int(np.size(leaf))
     return names
 
 
 def _non_finite_parameters(tree: Any) -> list[str]:
     """Friendly paths of every Parameter in *tree* that went non-finite."""
     return [
-        _friendly_path(path)
-        for path, p in _iter_parameters(tree)
+        friendly_path(path)
+        for path, p in iter_parameters(tree)
         if not bool(jnp.all(jnp.isfinite(p.factor)))
     ]
 

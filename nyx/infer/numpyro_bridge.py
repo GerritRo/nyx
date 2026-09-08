@@ -9,12 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from nyx.core.parameter import (
-    _friendly_path,
-    _iter_parameters,
-    _matching_paths,
-    set_parameters,
-)
+from nyx.core.paramtree import friendly_path, iter_parameters, matching_paths, set_parameters
 
 __all__ = ["scene_model", "free_parameters", "init_values"]
 
@@ -33,15 +28,20 @@ def _numpyro() -> Any:
 
 
 def free_parameters(model: Any) -> dict[str, tuple[int, ...]]:
-    """``{name: shape}`` of every unfrozen parameter.
+    """Shape of every unfrozen parameter: the sites :func:`scene_model` samples.
 
-    The sites :func:`scene_model` samples, and what the optimizer would
-    fit: a model says once which parameters are free.  Shapes are of the
-    physical value, which is what a prior is over.
+    Parameters
+    ----------
+    model : Scene or MultiTargetFit
+
+    Returns
+    -------
+    dict of str to tuple
+        Shapes of the physical values, which is what a prior is over.
     """
     return {
-        _friendly_path(path): tuple(jnp.shape(p.value))
-        for path, p in _iter_parameters(model)
+        friendly_path(path): tuple(jnp.shape(p.value))
+        for path, p in iter_parameters(model)
         if not p.frozen
     }
 
@@ -49,21 +49,31 @@ def free_parameters(model: Any) -> dict[str, tuple[int, ...]]:
 def init_values(model: Any) -> dict[str, jax.Array]:
     """Free parameter values, keyed to :func:`scene_model`'s sites.
 
-    For warm-starting a chain at a fit rather than at the prior::
+    For warm-starting a chain at a fit rather than at the prior.
 
-        kernel = NUTS(scene_model(fitted, ...),
-                      init_strategy=init_to_value(values=init_values(fitted)))
+    Parameters
+    ----------
+    model : Scene or MultiTargetFit
+
+    Returns
+    -------
+    dict of str to jax.Array
     """
-    return {_friendly_path(path): p.value for path, p in _iter_parameters(model) if not p.frozen}
+    return {friendly_path(path): p.value for path, p in iter_parameters(model) if not p.frozen}
 
 
 def _resolve_priors(
     model: Any, priors: Mapping[str, Any], free: dict[str, tuple[int, ...]]
 ) -> dict[str, Any]:
-    """Expand globbed prior keys onto the free parameter names."""
+    """Expand globbed prior keys onto the free parameter names.
+
+    Returns
+    -------
+    dict of str to numpyro.distributions.Distribution
+    """
     resolved: dict[str, Any] = {}
     for pattern, prior in priors.items():
-        names = [_friendly_path(path) for path in _matching_paths(model, pattern)]
+        names = [friendly_path(path) for path in matching_paths(model, pattern)]
         matched = [n for n in names if n in free]
         if not matched:
             raise KeyError(
@@ -93,36 +103,24 @@ def scene_model(
     """A NumPyro model sampling *model*'s unfrozen parameters.
 
     One site per free parameter, named and shaped as the parameter already
-    is, so a ``(nobs, 2)`` pointing offset is one site rather than two to
-    re-stack.  Sites carry physical values, so priors are in physical
-    units -- and the sampler sees the problem's own conditioning.  Give
-    NUTS a few hundred warmup steps and start it from a fit with
-    :func:`init_values`.
+    is, and carrying physical values, so priors are in physical units.
 
     Parameters
     ----------
     model : Scene or MultiTargetFit
-        Free parameters unfrozen, as :class:`~nyx.infer.Optimizer`
-        reads it.
-    data : mapping of {instrument: array}
-        Observed pixel rates, ``(nobs, n_pixels)``.
-    priors : mapping of {name: distribution}
-        One per free parameter; keys may glob. A scalar distribution is
+        Free parameters unfrozen, as :class:`~nyx.infer.Optimizer` reads it.
+    data : mapping of str to array-like
+        Observed pixel rates per instrument, ``(nobs, n_pixels)``.
+    priors : mapping of str to numpyro.distributions.Distribution
+        One per free parameter; keys may glob, and a scalar distribution is
         broadcast to the parameter's shape.
     likelihood : callable
         ``(predicted) -> distribution`` for one instrument's rates.
 
-    Examples
-    --------
-    ::
-
-        scene = unfreeze(freeze_all(scene), 'atmosphere.Mie.aod_500', '*.shift')
-        model = scene_model(
-            scene, {'CT1': images},
-            {'atmosphere.Mie.aod_500': dist.LogNormal(np.log(0.1), 0.5),
-             '*.shift': dist.Normal(0.0, 1e-3)},
-            lambda p: dist.LogNormal(jnp.log(p), 0.05),
-        )
+    Returns
+    -------
+    callable
+        The NumPyro model.
     """
     numpyro = _numpyro()
     free = free_parameters(model)

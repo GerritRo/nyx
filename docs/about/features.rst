@@ -53,6 +53,12 @@ backed by a published model or dataset:
   star flux is handled separately from the diffuse map to avoid
   double-counting.
 
+Every emitter but the airglow takes a ``brightness``: one fittable amplitude
+scaling everything it emits, on both the diffuse and the point path. For the
+zodiacal light, the Moon and the star catalogs it is the only free parameter
+they have, so it is how their level is fitted. The airglow is the exception
+because its SFU curve is already an amplitude.
+
 Atmospheric extinction and scattering
 -------------------------------------
 
@@ -91,16 +97,16 @@ Flexible spectral models
 ------------------------
 
 Source spectra are described by composable spectral models
-(:mod:`nyx.core.spectral`):
+(:mod:`nyx.utils.spectra`):
 
-- **Stored spectra** (:class:`~nyx.core.StoredSpectrum`) from empirical or
+- **Stored spectra** (:class:`~nyx.utils.spectra.StoredSpectrum`) from empirical or
   template libraries.
-- **Parametric spectra** (:class:`~nyx.core.ParametricSpectrum`) driven by a
+- **Parametric spectra** (:class:`~nyx.utils.spectra.ParametricSpectrum`) driven by a
   user-supplied, differentiable function of physical conditions.
-- **Pass-through spectra** (:class:`~nyx.core.PassThroughSpectrum`) for sources
+- **Pass-through spectra** (:class:`~nyx.utils.spectra.PassThroughSpectrum`) for sources
   that already carry per-wavelength radiance.
 - Flux-conserving resampling onto the model wavelength grid
-  (:func:`~nyx.core.resample_flux`).
+  (:func:`~nyx.utils.spectra.resample_flux`).
 
 nyx bundles solar, stellar (Pickles 1998), and empirical spectral templates,
 together with CALSPEC standards and SVO filter profiles (see :doc:`data`).

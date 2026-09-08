@@ -1,21 +1,7 @@
 """Sampling geometry of the focal plane.
 
-One convention holds for every angular grid in nyx, and both functions
-here rely on it:
-
-- a coordinate pair is ``[lon, lat]`` -- offset-frame longitude first,
-  matching ``(az, alt)`` everywhere else;
-- a 2-D grid is **lon-major**: axis 0 runs along longitude, axis 1 along
-  latitude, so ``values[i, j]`` sits at ``(lon[i], lat[j])`` and axis *k*
-  is indexed by column *k* of the coordinate pair.
-
-That is the layout the ray tracer tabulates a pixel response on, and it
-is fixed by the on-disk instrument format (``lattice/origin``,
-``lattice/step`` and ``lattice/offset`` are all stored lon-first), so
-:class:`~nyx.core.geometry.Geometry` builds its FOV evaluation grid the
-same way rather than the other way round.  Anything written against
-:attr:`~nyx.core.protocols.AtmosphereResult.scattering_map` or
-:attr:`~nyx.core.observation.SkyGeometry.fov_altaz_grid` follows it too.
+Every angular grid in nyx is lon-major: a coordinate pair is ``[lon, lat]``,
+and ``values[i, j]`` sits at ``(lon[i], lat[j])``.
 """
 
 from functools import cache
@@ -45,8 +31,7 @@ def _bilinear_coeffs(y_coords, x_coords, height, width):
 
 
 class PixelLattice(eqx.Module):
-    """
-    The sampling lattice every pixel's response grid is a window onto.
+    """The sampling lattice every pixel's response grid is a window onto.
 
     Parameters
     ----------
@@ -90,16 +75,15 @@ class PixelLattice(eqx.Module):
 
     @property
     def window_centers(self) -> jax.Array:
-        """Centre of each pixel's response window, radians. Shape (n_pixels, 2)."""
+        """Centre of each pixel's response window, shape ``(n_pixels, 2)``, in radians."""
         middle = (jnp.asarray(self.grid_shape, dtype=self.step.dtype) - 1.0) / 2.0
         return self.origin + (self.offset + middle) * self.step
 
     @property
     def grid(self) -> jax.Array:
-        """Per-pixel response sample coordinates. Shape (n_pixels, 2, grid_dim).
+        """Per-pixel response sample coordinates, shape ``(n_pixels, 2, grid_dim)``.
 
-        The explicit form :meth:`from_grid` consumes, for inspection and
-        for comparing against a ray tracer's own coordinates.
+        The explicit form :meth:`from_grid` consumes.
         """
         if self.grid_shape[0] != self.grid_shape[1]:
             raise ValueError(
@@ -115,14 +99,24 @@ class PixelLattice(eqx.Module):
     def from_grid(cls, grid, values, tol: float = LATTICE_TOL) -> "PixelLattice":
         """Recover the lattice underlying explicit sample coordinates.
 
-        ``grid`` is ``(n_pixels, 2, grid_dim)`` in radians and ``values``
-        ``(..., n_pixels, height, width)``, every leading axis (e.g. a
-        misalignment table) checked.  ``tol`` is in units of one step.
+        Parameters
+        ----------
+        grid : array-like, shape (n_pixels, 2, grid_dim)
+            Radians.
+        values : array-like, shape (..., n_pixels, height, width)
+            Every leading axis is checked.
+        tol : float
+            Tolerance, in units of one step.
 
-        Raises ``ValueError`` unless the responses vanish on their boundary
-        rows and columns and the sample coordinates sit on the nodes of a
-        common lattice: both make the projection separable, which is what
-        :func:`project_lattice` relies on.
+        Returns
+        -------
+        PixelLattice
+
+        Raises
+        ------
+        ValueError
+            Unless the responses vanish on their boundary rows and columns
+            and the sample coordinates sit on the nodes of a common lattice.
         """
         grid = np.asarray(grid, dtype=np.float64)
         values = np.asarray(values)
@@ -172,9 +166,16 @@ class PixelLattice(eqx.Module):
 def _fit_lattice_axis(coords_1d, n_iter: int = 8):
     """Least-squares ``(origin, step, residual)`` of the lattice under *coords_1d*.
 
-    ``coords_1d`` is ``(n_pixels, grid_dim)``, one axis of every pixel's
-    response grid; ``residual`` is the largest deviation of any sample from
-    a node, in steps.
+    Parameters
+    ----------
+    coords_1d : numpy.ndarray, shape (n_pixels, grid_dim)
+        One axis of every pixel's response grid.
+
+    Returns
+    -------
+    origin, step : float
+    residual : float
+        Largest deviation of any sample from a node, in steps.
     """
     flat = coords_1d.reshape(-1)
     step = float(np.median(np.diff(coords_1d, axis=1)))
@@ -202,9 +203,18 @@ def _fit_lattice_axis(coords_1d, n_iter: int = 8):
 def project_lattice(lattice: PixelLattice, values, coords, rates):
     """Project point sources onto pixels via the shared response lattice.
 
-    ``values`` is ``(n_pixels, height, width)``, ``coords`` ``(n_sources,
-    2)`` in the detector frame and ``rates`` the ``(n_sources,)``
-    band-integrated rates.  Returns ``(n_pixels,)``.
+    Parameters
+    ----------
+    lattice : PixelLattice
+    values : jax.Array, shape (n_pixels, height, width)
+    coords : jax.Array, shape (n_sources, 2)
+        Detector frame, in radians.
+    rates : jax.Array, shape (n_sources,)
+        Band-integrated rates.
+
+    Returns
+    -------
+    jax.Array, shape (n_pixels,)
     """
     n_rows, n_cols = lattice.shape
     grid_h, grid_w = lattice.grid_shape
@@ -238,9 +248,16 @@ def _simpson_weights(n: int) -> np.ndarray:
 
 
 def integrate_response(lattice: PixelLattice, values):
-    """Simpson-integrate each pixel's response ``(..., n_pixels, height, width)``.
+    """Simpson-integrate each pixel's response.
 
-    Returns a weight per pixel, shape ``values.shape[:-2]``.
+    Parameters
+    ----------
+    values : jax.Array, shape (..., n_pixels, height, width)
+    lattice : PixelLattice
+
+    Returns
+    -------
+    jax.Array, shape values.shape[:-2]
     """
     height, width = lattice.grid_shape
     if values.shape[-2:] != (height, width):
@@ -253,8 +270,15 @@ def integrate_response(lattice: PixelLattice, values):
 def response_centroid(lattice: PixelLattice, values):
     """Where each pixel looks: the first moment of its response.
 
-    ``values`` is ``(..., n_pixels, height, width)``; the result is
-    ``values.shape[:-2] + (2,)``, a field offset ``[lon, lat]`` in radians.
+    Parameters
+    ----------
+    values : jax.Array, shape (..., n_pixels, height, width)
+    lattice : PixelLattice
+
+    Returns
+    -------
+    jax.Array, shape values.shape[:-2] + (2,)
+        Field offset ``[lon, lat]`` in radians.
     """
     height, width = lattice.grid_shape
     if values.shape[-2:] != (height, width):
@@ -279,9 +303,21 @@ def response_centroid(lattice: PixelLattice, values):
 def interpolate_regular_grid(x, y, x0, x_step, nx, y0, y_step, ny, data):
     """Bilinear interpolation on a regular 2-D grid, clamped at the edges.
 
-    Samples ``data``, whose leading dims are ``(nx, ny, ...)``, at the
-    query point ``(x, y)``; the grid is given by its origin, step and count
-    along each axis.  Returns shape ``data.shape[2:]``.
+    Parameters
+    ----------
+    x, y : jax.Array
+        Query point.
+    x0, y0 : float
+        Grid origin.
+    x_step, y_step : float
+        Grid step.
+    nx, ny : int
+        Node count along each axis.
+    data : jax.Array, shape (nx, ny, ...)
+
+    Returns
+    -------
+    jax.Array, shape data.shape[2:]
     """
     # Fractional indices, clamped to valid range
     fx_raw = jnp.clip((x - x0) / x_step, 0.0, nx - 1.0)
@@ -306,11 +342,18 @@ def interpolate_regular_grid(x, y, x0, x_step, nx, y0, y_step, ny, data):
 def interpolate_pixel_rates(grid, values, coords):
     """Bilinear interpolation of the FOV evaluation grid at pixel centres.
 
-    ``values`` is ``(n_lon, n_lat)``, lon-major like every grid in nyx, and
-    ``coords`` ``(n_pixels, 2)`` as ``[lon, lat]`` in radians.  ``grid``
-    holds the ``(n,)`` node coordinates: the grid is square and both axes
-    share them, so there is nothing to put in the wrong order.  Returns one
-    value per pixel, zero outside the grid.
+    Parameters
+    ----------
+    values : jax.Array, shape (n_lon, n_lat)
+    coords : jax.Array, shape (n_pixels, 2)
+        ``[lon, lat]`` in radians.
+    grid : jax.Array, shape (n,)
+        Node coordinates, shared by both axes.
+
+    Returns
+    -------
+    jax.Array, shape (n_pixels,)
+        Zero outside the grid.
     """
     n_lon, n_lat = values.shape
     start, step = grid[0], grid[1] - grid[0]

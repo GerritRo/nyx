@@ -16,3 +16,4 @@ These modules contain the main user-facing APIs:
    atmosphere
    emitters
    infer
+   utils

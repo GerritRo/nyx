@@ -17,8 +17,8 @@ _SIGMA_LEVELS: dict[int, tuple[float, float, float]] = {
 class ProfileGrid:
     """A profile-likelihood scan: chi-squared over a grid, nuisances refitted.
 
-    Indexed in grid-axis order: ``chi2[i, j]`` is at
-    ``axes[0][i], axes[1][j]``.
+    Indexed in grid-axis order, so ``chi2[i, j]`` is at ``axes[0][i],
+    axes[1][j]``.
     """
 
     names: list[str]
@@ -27,18 +27,33 @@ class ProfileGrid:
 
     @property
     def delta_chi2(self) -> np.ndarray:
-        """Chi-squared relative to the best point on the grid."""
+        """Chi-squared relative to the best point on the grid.
+
+    Returns
+    -------
+    numpy.ndarray
+    """
         return self.chi2 - float(np.nanmin(self.chi2))
 
     @property
     def best(self) -> dict[str, float]:
-        """Where on the grid the chi-squared is lowest."""
+        """Where on the grid the chi-squared is lowest.
+
+    Returns
+    -------
+    tuple of float
+    """
         index = np.unravel_index(int(np.nanargmin(self.chi2)), self.chi2.shape)
         return {n: float(a[i]) for n, a, i in zip(self.names, self.axes, index, strict=True)}
 
     @property
     def levels(self) -> tuple[float, float, float]:
-        """Delta chi-squared at 1, 2 and 3 sigma, for a contour call."""
+        """Delta chi-squared at 1, 2 and 3 sigma, for a contour call.
+
+    Returns
+    -------
+    list of float
+    """
         try:
             return _SIGMA_LEVELS[len(self.names)]
         except KeyError:

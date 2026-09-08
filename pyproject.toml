@@ -44,7 +44,6 @@ dependencies = [
     "jax-healpy",
     "dust_extinction",
     "jax",
-    "chex",
     "equinox",
     "optimistix",
     "h5py",
@@ -60,7 +59,6 @@ infer = [
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
-    "pytest-doctestplus",
     "jupyter>=1.0",
     "mypy>=1.0",
     "nbclient>=0.7.0",

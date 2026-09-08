@@ -1,119 +1,110 @@
+"""Public API of nyx.core: the scene, the render kernel, and their parts."""
+
 from .coordinates import (
-    SunRelativeEclipticFrame,
     altaz_to_offset,
+    cos_angular_separation_jax,
     offset_to_altaz,
     rotation_matrix_from_altaz,
+    safe_arcsin,
 )
-from .filters import per_obs_filter, tile_per_obs
-from .geometry import Geometry
+from .filters import per_obs_filter, select_obs, tile_per_obs
+from .geometry import Geometry, check_shared_geometry
 from .io import FitResult, ObservationRecord, load_fit, save_fit
-from .observation import (
-    Observation,
-    RenderGeometry,
-    SkyGeometry,
-)
-from .parameter import (
-    Parameter,
+from .observation import Observation, SunRelativeEclipticFrame
+from .parameter import Parameter, is_parameter
+from .paramtree import (
+    ParametersTable,
     autoscale,
     dump_params,
     freeze,
     freeze_all,
+    friendly_keypath,
+    friendly_path,
+    hide_path_segments,
+    iter_parameters,
+    matching_paths,
     n_trainable,
+    navigate,
     parameters_table,
+    set_parameters,
     unfreeze,
     unfreeze_all,
+    walk,
 )
-from .pipeline import contributions, render
-from .protocols import (
-    AtmosphereModel,
+from .pipeline import RenderFrame, contributions, render
+from .protocols import AtmosphereModel, EmitterLike, InstrumentModel, SkySource
+from .records import (
     AtmosphereResult,
-    EmitterBuilder,
-    InstrumentModel,
     PointSourceData,
-    SkySource,
-    SourceModel,
+    RenderGeometry,
+    SkyGeometry,
     SourceObsData,
 )
 from .scene import Scene
-from .spectral import (
-    ParametricSpectrum,
-    PassThroughSpectrum,
-    SpectralModel,
-    StoredSpectrum,
-    resample_flux,
-)
 from .units import (
     ANGLE,
     FLUX,
     RADIANCE,
-    RATE,
-    SOLID_ANGLE,
     WAVELENGTH,
     energy_flux_to_photon_flux,
     to_angle_rad,
-    to_flux,
-    to_radiance,
     to_wavelength_nm,
 )
 
 __all__ = [
-    # units
-    "WAVELENGTH",
-    "RADIANCE",
-    "FLUX",
-    "RATE",
     "ANGLE",
-    "SOLID_ANGLE",
-    "to_wavelength_nm",
-    "to_radiance",
-    "to_flux",
-    "to_angle_rad",
-    "energy_flux_to_photon_flux",
-    # coordinates
-    "SunRelativeEclipticFrame",
-    "rotation_matrix_from_altaz",
-    "altaz_to_offset",
-    "offset_to_altaz",
-    # spectral (JAX-time only)
-    "resample_flux",
-    "SpectralModel",
-    "StoredSpectrum",
-    "PassThroughSpectrum",
-    "ParametricSpectrum",
-    # geometry & observation
-    "Geometry",
-    "Observation",
-    "SkyGeometry",
-    "RenderGeometry",
-    # scene
-    "Scene",
-    # pipeline
-    "render",
-    "contributions",
-    # protocols
-    "SkySource",
-    "PointSourceData",
-    "SourceModel",
-    "SourceObsData",
-    "EmitterBuilder",
+    "FLUX",
+    "RADIANCE",
+    "WAVELENGTH",
     "AtmosphereModel",
     "AtmosphereResult",
-    "InstrumentModel",
-    "per_obs_filter",
-    "tile_per_obs",
-    # parameter
-    "Parameter",
-    "autoscale",
-    "freeze",
-    "unfreeze",
-    "freeze_all",
-    "unfreeze_all",
-    "parameters_table",
-    "dump_params",
-    "n_trainable",
-    # io
+    "EmitterLike",
     "FitResult",
+    "Geometry",
+    "InstrumentModel",
+    "Observation",
     "ObservationRecord",
-    "save_fit",
+    "Parameter",
+    "PointSourceData",
+    "RenderFrame",
+    "RenderGeometry",
+    "Scene",
+    "SkyGeometry",
+    "SkySource",
+    "SourceObsData",
+    "SunRelativeEclipticFrame",
+    "altaz_to_offset",
+    "autoscale",
+    "check_shared_geometry",
+    "contributions",
+    "cos_angular_separation_jax",
+    "dump_params",
+    "energy_flux_to_photon_flux",
+    "freeze",
+    "freeze_all",
     "load_fit",
+    "n_trainable",
+    "offset_to_altaz",
+    "parameters_table",
+    "per_obs_filter",
+    "render",
+    "rotation_matrix_from_altaz",
+    "safe_arcsin",
+    "save_fit",
+    "select_obs",
+    "set_parameters",
+    "tile_per_obs",
+    "to_angle_rad",
+    "to_wavelength_nm",
+    "unfreeze",
+    "unfreeze_all",
+    "ParametersTable",
+    "friendly_keypath",
+    "friendly_path",
+    "hide_path_segments",
+    "is_parameter",
+    "iter_parameters",
+    "matching_paths",
+    "navigate",
+    "walk",
 ]

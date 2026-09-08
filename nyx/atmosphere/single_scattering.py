@@ -12,15 +12,20 @@ from nyx.atmosphere.components import (
     tau_ozone,
 )
 from nyx.core.coordinates import cos_angular_separation_jax
-from nyx.core.protocols import AtmosphereModel, AtmosphereResult
+from nyx.core.paramtree import hide_path_segments
+from nyx.core.protocols import AtmosphereModel
+from nyx.core.records import AtmosphereResult
+
+# Hide the components path segment
+hide_path_segments("components")
 
 
 class SingleScattering(AtmosphereModel):
-    """Single-scattering atmosphere.
+    """Single-scattering atmosphere, composed of named components.
 
-    Composes named :class:`ScatteringComponent` modules, each providing
-    its own optical depth, phase function, single-scattering albedo,
-    airmass and trainable parameters.
+    Each :class:`~nyx.atmosphere.components.ScatteringComponent` supplies its
+    own optical depth, phase function, single-scattering albedo, airmass and
+    trainable parameters.
     """
 
     components: dict
@@ -30,13 +35,13 @@ class SingleScattering(AtmosphereModel):
     _geo_signature: tuple = eqx.field(static=True)
 
     def __init__(self, geo, components, airmass_formula="kasten_young_1989"):
-        """
+        """Build the atmosphere.
+
         Parameters
         ----------
         geo : Geometry
-        components : dict[str, ScatteringComponent]
-            Named scattering and absorption components to compose, each
-            built against ``geo.wvls``.
+        components : dict of str to ScatteringComponent
+            Components to compose, each built against ``geo.wvls``.
         airmass_formula : str
             Key into :data:`~nyx.atmosphere.components.AIRMASS_FUNCTIONS`.
         """
@@ -64,7 +69,7 @@ class SingleScattering(AtmosphereModel):
             ) from None
 
     def _airmass(self, altitudes):
-        """Airmass at the given altitudes."""
+        """Airmass at the given altitudes, in radians."""
         return self._airmass_func(jnp.pi / 2 - altitudes)
 
     def _tau_components(self, height_km):
@@ -79,9 +84,7 @@ class SingleScattering(AtmosphereModel):
         """Slant optical depth ``sum_i tau_i * X_i`` along each line of sight.
 
         For altitudes of shape ``S`` the result is ``S + (n_wvl,)``.  Each
-        component supplies its own airmass, so a species confined to a
-        layer far above the troposphere is not forced onto the tropospheric
-        one; see :class:`~nyx.atmosphere.components.TabulatedAbsorption`.
+        component supplies its own airmass.
         """
         zenith = jnp.pi / 2 - jnp.asarray(altitudes)
         path = jnp.zeros(zenith.shape + (len(self._wvls),))
@@ -91,16 +94,25 @@ class SingleScattering(AtmosphereModel):
         return path
 
     def extinct(self, altitudes, spectra, height_km):
-        """Extinct point-source spectra ``(n_sources, n_wvl)``."""
+        """Extinct point-source spectra, shape ``(n_sources, n_wvl)``."""
         path = self._optical_path(jnp.asarray(altitudes)[..., 0], height_km)
         return spectra * jnp.exp(-path)
 
     def _scattering_kernel_from_tau(self, cos_scat_angle, sec_z_fov, sec_z_source, tau_total, taus):
-        """Scattering kernel ``(n_lon, n_lat, n_sources, n_wvl)``, given tau.
+        """Scattering kernel, given the optical depths.
 
-        ``cos_scat_angle`` is ``(n_lon, n_lat, n_sources)``, the two
-        airmasses ``(n_lon, n_lat)`` and ``(n_sources,)``, and the optical
-        depths ``(n_wvl,)`` each.
+        Parameters
+        ----------
+        cos_scat_angle : jax.Array, shape (n_lon, n_lat, n_sources)
+        sec_z_fov : jax.Array, shape (n_lon, n_lat)
+        sec_z_source : jax.Array, shape (n_sources,)
+        tau_total : jax.Array, shape (n_wvl,)
+        taus : dict of str to jax.Array
+            Per-component optical depth, each of shape ``(n_wvl,)``.
+
+        Returns
+        -------
+        jax.Array, shape (n_lon, n_lat, n_sources, n_wvl)
         """
         indicatrix = jnp.zeros(cos_scat_angle.shape + (len(self._wvls),))
         for comp, tau_i in zip(self.components.values(), taus, strict=True):
@@ -119,7 +131,12 @@ class SingleScattering(AtmosphereModel):
 
     @staticmethod
     def _cos_scattering_angle(sky):
-        """Cosine ``(n_lon, n_lat, nsky)`` from every FOV cell to every sky pixel."""
+        """Cosine of the angle from every FOV cell to every sky pixel.
+
+        Returns
+        -------
+        jax.Array, shape (n_lon, n_lat, nsky)
+        """
         return cos_angular_separation_jax(
             sky.fov_altaz_grid[..., 0][..., None],
             sky.fov_altaz_grid[..., 1][..., None],
@@ -139,7 +156,16 @@ class SingleScattering(AtmosphereModel):
         )
 
     def evaluate(self, sky):
-        """Extinction and scattering kernel over the whole hemisphere."""
+        """Extinction and scattering kernel over the whole hemisphere.
+
+        Parameters
+        ----------
+        sky : SkyGeometry
+
+        Returns
+        -------
+        AtmosphereResult
+        """
         alt_hp = sky.altaz_coord[..., 1]
         sec_z_hp = self._airmass(alt_hp)
 
@@ -163,11 +189,20 @@ class SingleScattering(AtmosphereModel):
         )
 
     def scatter_sources(self, sky, source_coords, source_spectra, bp):
-        """Scatter discrete point sources onto the FOV grid ``(n_lon, n_lat)``.
+        """Scatter discrete point sources onto the FOV grid.
 
-        ``source_coords`` is ``(n_src, 2)`` AltAz in radians,
-        ``source_spectra`` ``(n_src, n_wvl)`` in flux units, ``bp`` the
-        ``(n_wvl,)`` bandpass weights.
+        Parameters
+        ----------
+        sky : SkyGeometry
+        source_coords : jax.Array, shape (n_src, 2)
+            AltAz in radians.
+        source_spectra : jax.Array, shape (n_src, n_wvl)
+        bp : jax.Array, shape (n_wvl,)
+            Bandpass weights.
+
+        Returns
+        -------
+        jax.Array, shape (n_lon, n_lat)
         """
         fov_az = sky.fov_altaz_grid[..., 0]  # (n_lon, n_lat)
         fov_alt = sky.fov_altaz_grid[..., 1]  # (n_lon, n_lat)
@@ -199,7 +234,12 @@ class SingleScattering(AtmosphereModel):
 
 
 def _rayleigh_mie(geo, aod_500, angstrom_exp, hg_asymmetry, hg_ssa, pressure_hpa):
-    """The Rayleigh + Henyey-Greenstein pair both standard atmospheres share."""
+    """Classic rayleigh and mie scattering pair.
+
+    Returns
+    -------
+    dict of str to ScatteringComponent
+    """
     w = geo.wvls
     return {
         "Rayleigh": RayleighComponent(w, pressure_hpa=pressure_hpa),
@@ -236,8 +276,12 @@ def HGNoAbsorption(
     airmass_formula : str
         Key into :data:`~nyx.atmosphere.components.AIRMASS_FUNCTIONS`.
     pressure_hpa : float or None
-        Station pressure for the Rayleigh column.  Defaults to the
+        Station pressure for the Rayleigh column; ``None`` uses the
         barometric estimate from the observer height.
+
+    Returns
+    -------
+    SingleScattering
     """
     components = _rayleigh_mie(geo, aod_500, angstrom_exp, hg_asymmetry, hg_ssa, pressure_hpa)
     return SingleScattering(geo, components, airmass_formula=airmass_formula)
@@ -255,13 +299,21 @@ def HGOzoneAbsorption(
 ):
     """:func:`HGNoAbsorption` plus an ozone absorption layer.
 
-    Takes the same arguments, and additionally
-
     Parameters
     ----------
+    geo : Geometry
+    aod_500, angstrom_exp, hg_asymmetry, hg_ssa : float
+    airmass_formula : str
+    pressure_hpa : float or None
+        Station pressure for the Rayleigh column; ``None`` uses the
+        barometric estimate from the observer height.
     ozone_height_km : float or None
-        Height of the ozone layer, used for its own airmass.  ``None``
-        puts it back on the shared airmass formula.
+        Height of the ozone layer, used for its own airmass; ``None`` puts it
+        back on the shared airmass formula.
+
+    Returns
+    -------
+    SingleScattering
     """
     components = _rayleigh_mie(geo, aod_500, angstrom_exp, hg_asymmetry, hg_ssa, pressure_hpa)
     components["O3"] = tau_ozone(geo.wvls, layer_height_km=ozone_height_km)

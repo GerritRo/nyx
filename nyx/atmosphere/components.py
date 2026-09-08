@@ -5,7 +5,7 @@ import numpy as np
 
 from nyx import ASSETS_PATH
 from nyx.core.parameter import Parameter
-from nyx.core.spectral import resample_flux
+from nyx.utils.spectra import resample_flux
 
 _R_EARTH_KM = 6378.0
 
@@ -13,24 +13,18 @@ _SEA_LEVEL_HPA = 1013.25
 
 
 def plane_parallel(Z):
-    """
-    Plane-parallel airmass. Z is zenith angle in radians.
-    """
+    """Plane-parallel airmass at zenith angle *Z*, in radians."""
     return 1 / jnp.maximum(jnp.cos(Z), 0.025)
 
 
 def kasten_young_1989(Z):
-    """
-    Kasten & Young (1989) airmass formula. Z is zenith angle in radians.
-    """
+    """Kasten & Young (1989) airmass at zenith angle *Z*, in radians."""
     Z_safe = jnp.minimum(Z, jnp.pi / 2)
     return 1 / (jnp.cos(Z_safe) + 0.50572 * (96.07995 - jnp.rad2deg(Z_safe)) ** (-1.6364))
 
 
 def thin_shell_airmass(zenith, height_km):
-    """
-    Slant path through a thin shell at *height_km*, relative to vertical.
-    """
+    """Slant path through a thin shell at *height_km*, relative to vertical."""
     z = jnp.minimum(jnp.asarray(zenith), jnp.pi / 2)
     ratio = _R_EARTH_KM / (_R_EARTH_KM + height_km)
     return 1.0 / jnp.sqrt(1.0 - ratio**2 * jnp.sin(z) ** 2)
@@ -65,14 +59,18 @@ def tau_rayleigh(wavelengths_nm, height_km, pressure_hpa=None, scale_height_km=8
 
     Parameters
     ----------
-    wavelengths_nm : array
+    wavelengths_nm : array-like
         Wavelengths in nm.
-    height_km : array or float
+    height_km : array-like or float
         Observer height above sea level, in km.
     pressure_hpa : float or None
         Station pressure.
     scale_height_km : float
         Scale height of the barometric fallback ``exp(-height / H)``.
+
+    Returns
+    -------
+    jax.Array
     """
     return _rayleigh_tau_sea_level(wavelengths_nm) * _column_scaling(
         height_km, pressure_hpa, scale_height_km
@@ -124,9 +122,7 @@ class ScatteringComponent(eqx.Module):
 
     @property
     def ssa(self) -> float:
-        """
-        Single-scattering albedo: the fraction of ``tau`` that scatters.
-        """
+        """Single-scattering albedo: the fraction of ``tau`` that scatters."""
         return 1.0
 
     def tau(self, height_km) -> jax.Array:
@@ -138,10 +134,9 @@ class ScatteringComponent(eqx.Module):
     def airmass(self, zenith, default_airmass):
         """Relative airmass of this component at zenith angle *zenith*.
 
-        Defaults to the atmosphere's shared airmass formula, which is the
-        right one for a species mixed through the troposphere.  A
-        component confined to a narrow layer far above it overrides this;
-        see :class:`TabulatedAbsorption`.
+        Defaults to the atmosphere's shared formula, which suits a species
+        mixed through the troposphere; a component confined to a narrow layer
+        far above it overrides this.
         """
         return default_airmass(zenith)
 
@@ -154,15 +149,16 @@ class RayleighComponent(ScatteringComponent):
     _scale_height_km: float = eqx.field(static=True)
 
     def __init__(self, rendering_wvls, pressure_hpa=None, scale_height_km=8.0):
-        """
+        """Build the component.
+
         Parameters
         ----------
-        rendering_wvls : array
+        rendering_wvls : array-like
             Wavelength grid in nm.
         pressure_hpa : float or None
-            Station pressure.  When given it fixes the air column
-            directly and the observer height is ignored; otherwise the
-            column falls back to ``exp(-height / scale_height_km)``.
+            Station pressure. When given it fixes the air column and the
+            observer height is ignored; otherwise the column falls back to
+            ``exp(-height / scale_height_km)``.
         scale_height_km : float
             Scale height of the barometric fallback.
         """
@@ -181,9 +177,7 @@ class RayleighComponent(ScatteringComponent):
 
 
 class HenyeyGreensteinComponent(ScatteringComponent):
-    """
-    Mie/aerosol scattering with Henyey-Greenstein phase function.
-    """
+    """Mie aerosol scattering with a Henyey-Greenstein phase function."""
 
     aod_500: Parameter
     angstrom_exp: Parameter
@@ -198,10 +192,11 @@ class HenyeyGreensteinComponent(ScatteringComponent):
         hg_asymmetry=0.75,
         hg_ssa=0.9,
     ):
-        """
+        """Build the component.
+
         Parameters
         ----------
-        rendering_wvls : array
+        rendering_wvls : array-like
             Wavelength grid in nm.
         aod_500 : float
             Aerosol optical depth at 500 nm.
@@ -238,8 +233,8 @@ class HenyeyGreensteinComponent(ScatteringComponent):
 class TabulatedAbsorption(ScatteringComponent):
     """Pure absorption from a tabulated optical-depth spectrum.
 
-    Pass ``jnp.inf`` for a column that does not vary with observer
-      altitude (e.g. stratospheric O₃).
+    Pass ``jnp.inf`` as the layer height for a column that does not vary with
+    observer altitude, e.g. stratospheric ozone.
     """
 
     _tau_shape: jax.Array
@@ -291,10 +286,14 @@ def tau_ozone(rendering_wvls, layer_height_km=25.0):
 
     Parameters
     ----------
-    rendering_wvls : array
+    rendering_wvls : array-like
         Wavelength grid in nm.
     layer_height_km : float or None
         Height of the ozone layer.
+
+    Returns
+    -------
+    TabulatedAbsorption
     """
     o3_table = np.genfromtxt(ASSETS_PATH + "eso_skycalc_ozone_absorption.dat")
 
