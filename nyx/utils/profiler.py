@@ -1,5 +1,3 @@
-"""Device-memory profiling for a scene and its render pass."""
-
 from dataclasses import dataclass
 
 import jax

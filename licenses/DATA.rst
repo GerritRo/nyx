@@ -147,7 +147,7 @@ STScI CALSPEC Vega spectrum
 :Source: STScI CALSPEC database, ``alpha_lyr_stis_012.fits``
    (https://www.stsci.edu/hst/instrumentation/reference-data-for-calibration-and-tools/astronomical-catalogs/calspec)
 :Used by: the ``Bandpass`` zero-point code
-:Description: Composite absolute-flux SED of Vega (α Lyr) on the HST/CALSPEC
+:Description: Composite absolute-flux SED of Vega on the HST/CALSPEC
    flux scale, combining STIS spectrophotometry with a tailored Kurucz
    9550 K model atmosphere. Used as the primary optical/IR flux standard.
 :Reference: Bohlin, R. C., Hubeny, I. & Rauch, T. 2020, "New Grids of

@@ -1,5 +1,3 @@
-"""A single point source at a fixed sky position."""
-
 from __future__ import annotations
 
 from typing import Any
@@ -24,7 +22,7 @@ class PointSource(Emitter):
     geo : Geometry
         Resolution configuration.
     coord : astropy.coordinates.SkyCoord
-        Scalar ICRS position, transformed to AltAz per observation.  Proper
+        Scalar ICRS position, transformed to AltAz per observation. Proper
         motion is applied when the coordinate carries it.
     spectrum : SpectralModel or array-like, optional
         Spectrum on ``geo.wvls``, in ``photon / s / m^2 / nm``.  An array is

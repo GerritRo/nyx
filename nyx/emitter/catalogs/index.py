@@ -1,5 +1,3 @@
-"""Cone search over catalog positions, indexed by HEALPix pixel."""
-
 from __future__ import annotations
 
 import healpy as hp

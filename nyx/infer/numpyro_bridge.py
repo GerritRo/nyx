@@ -1,5 +1,3 @@
-"""Turn a nyx model into a NumPyro model."""
-
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping

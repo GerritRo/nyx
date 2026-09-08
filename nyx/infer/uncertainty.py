@@ -1,5 +1,3 @@
-"""Parameter uncertainties from the Gauss-Newton covariance."""
-
 from __future__ import annotations
 
 import dataclasses

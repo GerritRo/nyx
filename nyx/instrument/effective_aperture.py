@@ -1,5 +1,3 @@
-"""Instruments built from an effective-aperture response table."""
-
 from collections.abc import Callable
 
 import astropy.units as u

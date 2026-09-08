@@ -1,5 +1,3 @@
-"""The trainable parameter: a value, a scale, and how to constrain it."""
-
 from __future__ import annotations
 
 import dataclasses

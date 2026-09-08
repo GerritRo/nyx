@@ -120,7 +120,7 @@ def render(scene: RenderFrame) -> jax.Array:
     """Render a single-observation scene to pixel rates.
 
     Diffuse radiance is always map-scattered, and additionally extincted
-    along the line of sight when ``direct=True``.  Point sources are always
+    along the line of sight when ``direct=True``. Point sources are always
     extincted and projected, and in-scattered individually when
     ``inscatter=True``.
 
@@ -134,8 +134,6 @@ def render(scene: RenderFrame) -> jax.Array:
     jax.Array, shape (n_pixels,)
         Photon detection rate per pixel, in photon/s.
     """
-    # Radiance is summed across sources before the atmosphere is applied, so
-    # the scattering contraction -- the dominant cost -- runs only once.
     inst = scene.instrument
     atmo = scene.atmosphere
     sky = scene.render_geometry.sky

@@ -1,5 +1,3 @@
-"""The fit driver."""
-
 from __future__ import annotations
 
 import dataclasses
@@ -71,14 +69,14 @@ class Optimizer:
     """Fit any pytree of Parameters with a minimiser or least-squares solver.
 
     Trains every non-frozen :class:`~nyx.core.parameter.Parameter` reachable
-    from *model*.  Per-obs parameters get independent per-observation
+    from *model*. Per-obs parameters get independent per-observation
     gradients, global ones the sum over observations.
 
     Parameters
     ----------
     fn : callable
         ``(model) -> scalar`` for a minimiser, or ``(model) -> residuals``
-        for a least-squares solver.  A non-scalar *fn* given to a minimiser
+        for a least-squares solver. A non-scalar *fn* given to a minimiser
         is wrapped with sum-of-squares.
     solver : optimistix.AbstractIterativeSolver
         E.g. ``optx.BFGS`` or ``optx.LevenbergMarquardt``; the latter is

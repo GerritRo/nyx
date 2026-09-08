@@ -82,9 +82,7 @@ def walk(
             return
     if prune is not None and prune(tree):
         return
-    # The three branches are spelled out rather than unified behind one
-    # iterator: this runs once per node of every scene traversal, and the
-    # intermediate generator costs more than the repetition saves.
+
     if isinstance(tree, eqx.Module):
         for name in tree.__dataclass_fields__:
             yield from walk(getattr(tree, name), match, prune=prune, _prefix=_prefix + (name,))
@@ -221,9 +219,7 @@ def set_parameters[T](tree: T, params: dict[str, Any]) -> T:
     -------
     pytree
     """
-    # Resolve every pattern first, then rebuild once.  Rebuilding per matched
-    # path made this quadratic in the number of parameters, which is felt
-    # inside fit loops.  Later patterns still win over earlier ones.
+    # Resolve every pattern first, then rebuild once.
     resolved: dict[tuple[Any, ...], tuple[str, Any]] = {}
     for pattern, value in params.items():
         for path in matching_paths(tree, pattern):
@@ -464,9 +460,7 @@ def _wrap_value(path: str, target: Any, value: Any) -> Any:
 
 
 # Intermediate container names to hide from displayed paths:
-# ``instruments.CT1.shift`` reads better as ``CT1.shift``.  Containers
-# register their own field names (see hide_path_segments), so this module
-# does not have to know the field names of the ones built on top of it.
+# ``instruments.CT1.shift`` reads better as ``CT1.shift``.
 _HIDDEN_PATH_SEGMENTS: set[str] = set()
 
 

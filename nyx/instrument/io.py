@@ -1,5 +1,3 @@
-"""Reading and writing instruments in nyx's own HDF5 format."""
-
 from pathlib import Path
 
 import h5py

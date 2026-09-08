@@ -1,9 +1,3 @@
-"""The Gaia DR3 catalog: fetching it, and the spectral model it implies.
-
-Split out of :mod:`nyx.emitter.stars` so that a new data release changes this
-module and nothing else.
-"""
-
 from __future__ import annotations
 
 import healpy as hp
@@ -94,11 +88,6 @@ def catalog_map(
 
 def color_grid(bp: np.ndarray, rp: np.ndarray) -> SpectralGrid:
     """Reddened Pickles (1998) spectra indexed by the Gaia ``RP - BP`` colour.
-
-    The expensive half of the spectral model: three passband fetches and a
-    reddening scan over the whole library.  Kept separate so a caller building
-    two models over the same catalog -- :func:`~nyx.emitter.stars.gaia_star_field`
-    does -- pays for it once.
 
     Parameters
     ----------

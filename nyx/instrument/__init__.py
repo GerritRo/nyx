@@ -1,5 +1,3 @@
-"""Instrument models: what the telescope and camera do to the sky."""
-
 from ._iactrace import ApertureTable, load_aperture_table
 from ._interpolation import PixelLattice
 from .effective_aperture import EffectiveApertureInstrument, EffectiveApertureMisalignmentInstrument

@@ -1,5 +1,3 @@
-"""What is being observed, and the coordinate frames it is expressed in."""
-
 from __future__ import annotations
 
 from typing import Any

@@ -1,5 +1,3 @@
-"""Spectra: the model types, the grid numerics, and the reference data."""
-
 from __future__ import annotations
 
 import warnings

@@ -1,5 +1,3 @@
-"""Watch a fit converge, one solver step at a time."""
-
 from __future__ import annotations
 
 import warnings

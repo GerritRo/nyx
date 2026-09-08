@@ -1,5 +1,3 @@
-"""The JAX pytrees that flow through the render pipeline."""
-
 from __future__ import annotations
 
 import dataclasses
@@ -48,7 +46,7 @@ class PointSourceData(eqx.Module):
 class SourceObsData(eqx.Module):
     """Per-instrument observation data for any sky source.
 
-    Returned by every emitter builder's ``prepare(obs)``.  All condition
+    Returned by every emitter builder's ``prepare(obs)``. All condition
     fields are optional: a diffuse-only emitter sets ``diffuse_conditions``,
     a point-only one ``source_conditions`` and ``source_coords``.
 

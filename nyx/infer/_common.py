@@ -1,5 +1,3 @@
-"""Shared internals of the fitting modules."""
-
 from __future__ import annotations
 
 import warnings

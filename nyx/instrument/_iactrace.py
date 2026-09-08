@@ -1,5 +1,3 @@
-"""Adapting an iactrace effective-aperture table to a nyx instrument."""
-
 from __future__ import annotations
 
 import json

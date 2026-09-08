@@ -1,5 +1,3 @@
-"""Partitioning a scene pytree along its per-observation axis."""
-
 from __future__ import annotations
 
 import dataclasses

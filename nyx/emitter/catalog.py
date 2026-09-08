@@ -1,11 +1,3 @@
-"""What a star catalog is, apart from which catalog it happens to be.
-
-:class:`CatalogEmitter` is the half of a catalog emitter that does not care
-where the stars came from: the cone-search index, the match, and taking one
-star out as a :class:`~nyx.emitter.point_source.PointSource`.  The concrete
-catalogs are in :mod:`nyx.emitter.stars`.
-"""
-
 from __future__ import annotations
 
 from typing import Any
@@ -28,7 +20,7 @@ _POP_RADIUS = 10 * u.arcsec
 
 
 class CatalogEmitter(Emitter):
-    """A star catalog you can take one star out of, as a point source.
+    """A star catalog.
 
     Subclasses supply :meth:`_pop_conditions` and, if their stars carry their
     own scattered halo, ``_pop_inscatter``.
@@ -139,9 +131,7 @@ class CatalogEmitter(Emitter):
 
         The star leaves this catalog's point-source list and comes back as a
         :class:`~nyx.emitter.point_source.PointSource` with its catalog
-        position, its catalog spectrum, and a free ``brightness``.  What else
-        it keeps or loses depends on the catalog: see each subclass's
-        :meth:`_pop_conditions`.
+        position, its catalog spectrum, and a free ``brightness``.
 
         Parameters
         ----------
@@ -168,8 +158,6 @@ class CatalogEmitter(Emitter):
         """
         idx = self._match_row(coord, radius)
         self._taken[idx] = True
-        # The catalog's own spectral model on the star's own photometry:
-        # exactly the spectrum ``prepare`` would have built for it.
         spectrum = self._spectral_model(jnp.asarray(self._pop_conditions(idx))[None, :])
         kwargs.setdefault("inscatter", self._pop_inscatter)
         return PointSource(self._geo, self._coords[idx], spectrum, **kwargs)

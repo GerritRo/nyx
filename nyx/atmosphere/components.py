@@ -133,10 +133,6 @@ class ScatteringComponent(eqx.Module):
 
     def airmass(self, zenith, default_airmass):
         """Relative airmass of this component at zenith angle *zenith*.
-
-        Defaults to the atmosphere's shared formula, which suits a species
-        mixed through the troposphere; a component confined to a narrow layer
-        far above it overrides this.
         """
         return default_airmass(zenith)
 

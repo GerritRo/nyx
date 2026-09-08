@@ -1,5 +1,3 @@
-"""The scene: a shared physical sky observed by one or more instruments."""
-
 from __future__ import annotations
 
 import os

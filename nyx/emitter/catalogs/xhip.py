@@ -1,9 +1,3 @@
-"""The XHIP bright-star compilation, and the spectral model it implies.
-
-Split out of :mod:`nyx.emitter.stars` so that the catalog's file format and
-photometric system live in one place.
-"""
-
 from __future__ import annotations
 
 import astropy.units as u

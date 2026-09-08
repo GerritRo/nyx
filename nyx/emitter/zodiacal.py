@@ -1,5 +1,3 @@
-"""Zodiacal light: sunlight scattered by interplanetary dust, after Leinert et al. (1998)."""
-
 import astropy.units as u
 import jax.numpy as jnp
 import numpy as np
@@ -25,7 +23,7 @@ _SLOPE_NEAR = (1.2, 0.8)
 _SLOPE_FAR = (0.9, 0.6)
 
 
-# ---- internals
+# internals
 
 
 def _leinert_weights(alpha, beta, leinert_points, leinert_values, wvls):
@@ -116,8 +114,6 @@ class ZodiacalLight(Emitter):
     spectral_model : SpectralModel
     brightness : array-like or None
         Fittable overall amplitude; see :class:`~nyx.emitter.base.Emitter`.
-        This emitter has no other free parameter, so it is the only way to
-        fit the zodiacal level.
     transform : str or None
         Domain of *brightness*.
     """

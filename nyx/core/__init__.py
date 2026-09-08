@@ -1,5 +1,3 @@
-"""Public API of nyx.core: the scene, the render kernel, and their parts."""
-
 from .coordinates import (
     altaz_to_offset,
     cos_angular_separation_jax,

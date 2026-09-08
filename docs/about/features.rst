@@ -53,12 +53,6 @@ backed by a published model or dataset:
   star flux is handled separately from the diffuse map to avoid
   double-counting.
 
-Every emitter but the airglow takes a ``brightness``: one fittable amplitude
-scaling everything it emits, on both the diffuse and the point path. For the
-zodiacal light, the Moon and the star catalogs it is the only free parameter
-they have, so it is how their level is fitted. The airglow is the exception
-because its SFU curve is already an amplitude.
-
 Atmospheric extinction and scattering
 -------------------------------------
 

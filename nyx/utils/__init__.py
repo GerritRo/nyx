@@ -1,5 +1,3 @@
-"""Shared helpers: spectra, and render profiling."""
-
 from .profiler import profile_render, profile_scene
 from .spectra import (
     Bandpass,

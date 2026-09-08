@@ -1,5 +1,3 @@
-"""The resolution and grid configuration every component is built against."""
-
 from __future__ import annotations
 
 import hashlib

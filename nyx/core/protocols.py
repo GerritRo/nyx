@@ -1,5 +1,3 @@
-"""The interfaces the render pipeline is written against."""
-
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol, runtime_checkable

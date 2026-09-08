@@ -16,7 +16,7 @@ from nyx.utils.spectra import ParametricSpectrum, SpectralModel, resample_flux
 __all__ = ["Airglow"]
 
 
-# ---- internals
+# internals
 
 
 def _airglow_model_fn(base_spectra):
@@ -62,11 +62,6 @@ def _van_rhijn(altitude, height_km):
 
 class Airglow(Emitter):
     """Airglow source with van Rhijn weighting.
-
-    Alone among nyx's emitters this one takes no ``brightness``: its spectral
-    model already evaluates ``0.2 + 0.00614 * sfu(t)``, so a multiplicative
-    amplitude on top would be all but degenerate with ``sfu``'s constant term
-    and would leave the pair unidentifiable.  Fit the SFU curve instead.
 
     Parameters
     ----------

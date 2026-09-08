@@ -1,5 +1,3 @@
-"""Joint fits over several targets."""
-
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
@@ -58,10 +56,7 @@ class MultiTargetFit(eqx.Module):
 
     Instruments of the same name across scenes are linked: their non-per-obs
     Parameters live once in ``canonical_instruments`` and are injected into
-    every scene at render time, so their gradients sum over targets.  Per-obs
-    Parameters and per-target scene state stay on the individual scenes
-    unless listed in *share*.  Canonical values come from the first scene to
-    define them.
+    every scene at render time, so their gradients sum over targets.
 
     Parameters
     ----------

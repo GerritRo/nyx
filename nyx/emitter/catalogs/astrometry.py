@@ -1,5 +1,3 @@
-"""Astrometry and map resampling shared by the catalog emitters."""
-
 from __future__ import annotations
 
 import warnings

@@ -1,5 +1,3 @@
-"""The Moon as a point source, with the ROLO reflectance model."""
-
 import astropy
 import astropy.units as u
 import jax

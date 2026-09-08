@@ -1,9 +1,3 @@
-"""Sampling geometry of the focal plane.
-
-Every angular grid in nyx is lon-major: a coordinate pair is ``[lon, lat]``,
-and ``values[i, j]`` sits at ``(lon[i], lat[j])``.
-"""
-
 from functools import cache
 
 import equinox as eqx

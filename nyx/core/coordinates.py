@@ -103,10 +103,6 @@ def offset_to_altaz(lon: ArrayLike, lat: ArrayLike, R: ArrayLike) -> tuple[jax.A
     R = jnp.asarray(R)
     p = jnp.einsum("ij,...j->...i", R.T, p_local)
 
-    # Deliberately not safe_arcsin: azimuth is undefined at the pole too, so
-    # the guard is on the horizontal component and shared by both angles.  It
-    # therefore fires for |pz| > 1-2eps, whereas safe_arcsin fires only at
-    # |z| >= 1 -- in float32 the two disagree by ~7e-4 rad near the pole.
     eps = jnp.finfo(p.dtype).eps
     horiz_sq = p[..., 0] ** 2 + p[..., 1] ** 2
     at_pole = horiz_sq < 4 * eps

@@ -1,5 +1,3 @@
-"""Saving a fitted scene and its observations to HDF5, and reading it back."""
-
 from __future__ import annotations
 
 import os
@@ -122,10 +120,7 @@ def _load_altaz_kwargs(group: h5py.Group) -> dict[str, Any]:
     return out
 
 
-# One row per stored field: the ObservationRecord field, the Observation
-# attribute it comes from, and the pair that moves it in each direction.
-# Adding a field to Observation is one row here, rather than an edit to a
-# writer and a reader that have no way of noticing they disagree.
+# One row per stored field
 _OBSERVATION_SCHEMA: tuple[
     tuple[str, str, Callable[[h5py.Group, Any], None], Callable[[h5py.Group], Any]], ...
 ] = (

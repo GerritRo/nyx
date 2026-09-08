@@ -1,5 +1,3 @@
-"""Stars, as a catalog map and as individual point sources."""
-
 from __future__ import annotations
 
 import astropy.units as u

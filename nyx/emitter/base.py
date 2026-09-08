@@ -1,17 +1,3 @@
-"""The builder layer: what you subclass to write an emitter.
-
-An emitter is two objects.  This module is the first one: a builder that holds
-astropy and numpy state, and turns an
-:class:`~nyx.core.observation.Observation` into the arrays the render loop
-needs.  The second is the runtime pytree it hands to the scene, in
-:mod:`nyx.emitter.sources`.
-
-To write an emitter, subclass :class:`Emitter`, call ``super().__init__`` and
-implement :meth:`Emitter._prepare`.  Inheriting is a convenience, not a
-requirement: :class:`~nyx.core.protocols.EmitterLike` is all
-:meth:`~nyx.core.scene.Scene.build` asks for.
-"""
-
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -85,10 +71,7 @@ class Emitter(ABC):
         Maps conditions to spectra.
     brightness : array-like or None
         A fittable multiplier on everything this source emits.  ``None`` gives
-        the source no amplitude of its own; see
-        :class:`~nyx.emitter.sources.SpectralSource`.  A scalar is one value
-        for the run, ``(nobs,)`` a light curve, and ``(nobs, n_wvl)`` a
-        chromatic one.
+        the source no amplitude of its own.
     transform : str or None
         Domain of *brightness*, ``'log'`` by default.  Zero is a fixed point
         of that transform, so a curve reaching zero wants ``None``.
@@ -102,10 +85,6 @@ class Emitter(ABC):
         transform: str | None = "log",
     ) -> None:
         self._geo = geo
-        #: Signature of the Geometry this emitter was built against, compared
-        #: by :meth:`nyx.core.scene.Scene.build`.  ``None`` on a third-party
-        #: emitter that does not record one, which is not an error -- only a
-        #: missed check.
         self._geo_signature = geo.signature
         self._spectral_model = spectral_model
         self._brightness, self._nobs = _as_brightness(

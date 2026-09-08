@@ -1,13 +1,3 @@
-"""Estimating a nyx model's parameters from data.
-
-Optimisation (:mod:`~nyx.infer.optimizer`, :mod:`~nyx.infer.uncertainty`,
-:mod:`~nyx.infer.profile`, :mod:`~nyx.infer.multitarget`,
-:mod:`~nyx.infer.convergence`) gives a point estimate and its covariance;
-:mod:`~nyx.infer.numpyro_bridge` gives the posterior, and needs the
-``nyx[infer]`` extra.  Both solve for the unfrozen parameters and hold the
-frozen ones.
-"""
-
 from nyx.infer.convergence import FitTrace, record_fit
 from nyx.infer.multitarget import MultiTargetFit
 from nyx.infer.numpyro_bridge import free_parameters, init_values, scene_model
