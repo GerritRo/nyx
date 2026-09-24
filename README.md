@@ -4,10 +4,6 @@
 [![License](https://img.shields.io/badge/license-BSD--3--Clause-green)](LICENSE)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
-
-| :exclamation:  Major v0.2.0 update coming soon, including direct IACtrace integration, better memory efficiency and variable light curves   |
-|----------------------------------------------|
-
 **Differentiable Simulation of Night Sky Background in Imaging Atmospheric Cherenkov Telescopes**
 
 nyx models the night sky background for IACT telescopes, enabling parameter estimation through HMC or gradient-based optimization.
