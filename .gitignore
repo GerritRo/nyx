@@ -25,7 +25,6 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
-nyx/_version.py
 # PyInstaller
 *.manifest
 *.spec
@@ -68,6 +67,8 @@ instance/
 
 # Sphinx documentation
 docs/_build/
+# sphinx-automodapi writes per-object stubs next to the hand-written pages
+docs/api/nyx.*.rst
 
 # PyBuilder
 .pybuilder/
@@ -123,3 +124,4 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/
+.ruff_cache/

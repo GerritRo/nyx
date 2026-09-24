@@ -31,7 +31,7 @@ License
 -------
 
 nyx is released under the BSD-3-Clause license. See the
-`LICENSE <https://github.com/GerritRo/nyx/-/blob/main/licenses/LICENSE.rst>`_
+`LICENSE <https://github.com/GerritRo/nyx/blob/main/LICENSE>`_
 file for details.
 
 Citation

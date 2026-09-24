@@ -36,7 +36,7 @@ extensions = [
 
 # -- Options for myst-nb -----------------------------------------------------
 
-# Don't execute notebooks during build (they should be pre-executed)
+# Don't execute notebooks during build
 nb_execution_mode = "off"
 
 # Source file suffixes
@@ -68,8 +68,6 @@ autodoc_member_order = "bysource"
 autoclass_content = "both"
 
 autodoc_default_options = {
-    "members": True,
-    "undoc-members": True,
     "show-inheritance": True,
 }
 
@@ -89,7 +87,6 @@ intersphinx_mapping = {
 # -- Options for HTML output -------------------------------------------------
 
 html_theme = "furo"
-html_static_path = ["_static"]
 
 # Furo theme options
 html_theme_options = {
@@ -108,7 +105,7 @@ napoleon_include_special_with_doc = True
 napoleon_use_admonition_for_examples = True
 napoleon_use_admonition_for_notes = True
 napoleon_use_admonition_for_references = False
-napoleon_use_ivar = False
+napoleon_use_ivar = True
 napoleon_use_param = True
 napoleon_use_rtype = True
 napoleon_preprocess_types = False

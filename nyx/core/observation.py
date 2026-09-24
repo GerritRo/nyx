@@ -1,45 +1,103 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Any
 
-import equinox as eqx
+import astropy.units as u
 import jax
 import jax.numpy as jnp
 import numpy as np
-from astropy.coordinates import AltAz, EarthLocation, SkyCoord
-from astropy.coordinates.angles import angular_separation
+from astropy.coordinates import (
+    AltAz,
+    BaseCoordinateFrame,
+    EarthLocation,
+    FunctionTransform,
+    GeocentricTrueEcliptic,
+    RepresentationMapping,
+    SkyCoord,
+    SphericalRepresentation,
+    TimeAttribute,
+    frame_transform_graph,
+    get_body,
+)
 from astropy.time import Time
 
-from nyx.core.coordinates import (
-    SunRelativeEclipticFrame,
-    offset_to_altaz,
-    rotation_matrix_from_altaz,
-)
+from nyx.core.coordinates import offset_to_altaz, rotation_matrix_from_altaz
 from nyx.core.geometry import Geometry
+from nyx.core.records import PerObs, RenderGeometry, SkyGeometry
+
+__all__ = [
+    "Observation",
+    "SunRelativeEclipticFrame",
+]
 
 
-class SkyGeometry(eqx.Module):
-    """Hemisphere sky positions and FOV grid in all coordinate systems
-    (single observation).
+class SunRelativeEclipticFrame(BaseCoordinateFrame):
+    """Ecliptic frame with longitude measured from the Sun.
+
+    Coordinates are ``alpha`` (longitude, wrapped to +-180 deg) and ``beta``
+    (latitude).
     """
 
-    altaz_coord: jnp.ndarray  # (nsky, 2)
-    icrs_coord: jnp.ndarray  # (nsky, 2)
-    sref_coord: jnp.ndarray  # (nsky, 2)
-    fov_altaz_grid: jnp.ndarray  # (ngrid, ngrid, 2)
-    scattering_angle: jnp.ndarray  # (ngrid, ngrid, nsky)
-    height_km: jnp.ndarray  # scalar - observer height above sea level [km]
-    hemisphere_mask: jnp.ndarray  # (npix,) bool - upper hemisphere pixels
+    default_representation = SphericalRepresentation
+    obstime = TimeAttribute(default=None)
+
+    frame_specific_representation_info = {
+        SphericalRepresentation: [
+            RepresentationMapping("lon", "alpha"),
+            RepresentationMapping("lat", "beta"),
+            RepresentationMapping("distance", "distance"),
+        ]
+    }
 
 
-class RenderGeometry(eqx.Module):
-    """Combined sky geometry and pointing for the render pipeline
-    (single observation)."""
+@frame_transform_graph.transform(
+    FunctionTransform, GeocentricTrueEcliptic, SunRelativeEclipticFrame
+)
+def _gte_to_sunrel(
+    gte_coords: GeocentricTrueEcliptic, sunrel_frame: SunRelativeEclipticFrame
+) -> SunRelativeEclipticFrame:
+    obstime = gte_coords.obstime
+    if obstime is None:
+        raise ValueError("GeocentricTrueEcliptic coords must have obstime")
+    sun = get_body("sun", obstime)
+    sun_ecl = sun.transform_to(GeocentricTrueEcliptic(obstime=obstime))
+    alpha = (gte_coords.lon - sun_ecl.lon).wrap_at(180 * u.deg)
+    beta = gte_coords.lat
+    distance = gte_coords.distance if gte_coords.distance.unit != u.one else None
+    return SunRelativeEclipticFrame(alpha=alpha, beta=beta, distance=distance, obstime=obstime)
 
-    sky: SkyGeometry
-    pointing_matrix: jnp.ndarray  # (3, 3)
-    _per_obs: tuple[str, ...] = eqx.field(static=True, default=("sky", "pointing_matrix"))
+
+@frame_transform_graph.transform(
+    FunctionTransform, SunRelativeEclipticFrame, GeocentricTrueEcliptic
+)
+def _sunrel_to_gte(
+    sunrel_coords: SunRelativeEclipticFrame, gte_frame: GeocentricTrueEcliptic
+) -> GeocentricTrueEcliptic:
+    obstime = sunrel_coords.obstime
+    if obstime is None:
+        raise ValueError("SunRelativeEclipticFrame must have obstime")
+    sun_ecl = get_body("sun", obstime).transform_to(GeocentricTrueEcliptic(obstime=obstime))
+    lon = (sun_ecl.lon + sunrel_coords.alpha).wrap_at(360 * u.deg)
+    lat = sunrel_coords.beta
+    distance = sunrel_coords.distance if sunrel_coords.distance.unit != u.one else None
+    return GeocentricTrueEcliptic(lon=lon, lat=lat, distance=distance, obstime=obstime)
+
+
+def _format_span(seconds: float) -> str:
+    """A duration in the largest unit that still reads under 120.
+
+    Parameters
+    ----------
+    seconds : float
+
+    Returns
+    -------
+    str
+    """
+    for value, unit in ((seconds, "s"), (seconds / 60.0, "min")):
+        if float(f"{value:.4g}") < 120.0:
+            return f"{value:.4g} {unit}"
+    return f"{seconds / 3600.0:.4g} h"
 
 
 def _extract_icrs(skycoord: SkyCoord) -> tuple[np.ndarray, np.ndarray]:
@@ -52,7 +110,7 @@ def _extract_sref(skycoord: SkyCoord) -> tuple[np.ndarray, np.ndarray]:
     return skycoord.alpha.rad, skycoord.beta.rad
 
 
-# Registry of known frames: key -> (astropy_frame, extractor)
+# Registry of known frames
 _BUILTIN_FRAMES = {
     "icrs": ("icrs", _extract_icrs),
     "sref": (SunRelativeEclipticFrame(), _extract_sref),
@@ -60,34 +118,27 @@ _BUILTIN_FRAMES = {
 
 
 class Observation:
-    """Multi-observation context with precomputed coordinates and ephemeris.
-
-    Coordinate transforms are lazy: computed on first access via
-    get_sky_coords() and cached. Built-in frames (ICRS, SunRelativeEcliptic)
-    are pre-registered. Additional frames can be registered via
-    register_frame().
-
-    Each Observation has a single target and single location, observed at
-    one or more times (nobs = len(times)).
+    """One target and one location, observed at ``nobs = len(times)`` times.
 
     Parameters
     ----------
     location : EarthLocation
-        Single observer location.
     times : Time
-        Observation times (array or list).
+        Observation times.
     target : SkyCoord
-        Single scalar target (shared across all times).
-    geom : Geometry
+        Scalar target, shared across all times.
+    geo : Geometry
         Resolution configuration.
     refract_pointing : bool, optional
-        If True, the target ICRS is transformed to AltAz using the same
-        refracting frame as the rest of the pipeline (i.e. the pointing
-        direction is the apparent position). If False (default), the
-        pointing direction is the geometric AltAz (no refraction), while
-        the simulation pipeline still applies refraction via ``**kwargs``.
+        Whether the pointing direction is the apparent position rather than
+        the geometric AltAz.
     **kwargs
-        Additional AltAz frame parameters (pressure, temperature, etc.).
+        Further AltAz frame parameters, e.g. pressure and temperature.
+
+    Raises
+    ------
+    TypeError
+        If *target* is not a scalar SkyCoord.
     """
 
     def __init__(
@@ -95,7 +146,7 @@ class Observation:
         location: EarthLocation,
         times: Time,
         target: SkyCoord,
-        geom: Geometry,
+        geo: Geometry,
         refract_pointing: bool = False,
         **kwargs: Any,
     ) -> None:
@@ -104,108 +155,116 @@ class Observation:
         if not target.isscalar:
             raise TypeError("target must be a scalar SkyCoord.")
 
-        self.geom = geom
+        self.geo = geo
         self.times = times
         self.target_icrs = target
         self.nobs = len(times)
 
         self.location = location
         self._altaz_kwargs = kwargs
+        self._refract_pointing = refract_pointing
 
-        # Build per-observation AltAz frames and pointing geometry
         self.altaz_frames = [AltAz(location=self.location, obstime=t, **kwargs) for t in times]
-        ## Check if refraction should be applied for altaz pointing
         pointing_kwargs = kwargs if refract_pointing else {}
         pointing_frames = [
             AltAz(location=self.location, obstime=t, **pointing_kwargs) for t in times
         ]
-        self.targets_altaz, self.pointing_matrices = self._build_pointing(
-            self.target_icrs,
-            pointing_frames,
+        self.pointing_matrices, self._target_alt_deg = self._build_pointing(
+            self.target_icrs, pointing_frames
         )
 
-        # Precompute sky grids and scattering angles
-        self.hp_coords_altaz = SkyCoord(
-            geom.lon,
-            geom.lat,
-            unit="rad",
-            frame=self.altaz_frames[0],
-        )
-        self.fov_coords = self._build_fov_coords(geom, self.pointing_matrices, self.altaz_frames)
-        self.scattering_angle = self._compute_scattering_angles(
-            self.fov_coords,
-            self.hp_coords_altaz,
-        )
+        self.fov_coords = self._build_fov_coords(geo, self.pointing_matrices, self.altaz_frames)
 
-        # Frame registry and coordinate cache
-        self._frames = dict(_BUILTIN_FRAMES)
         self._sky_cache: dict[str, list[SkyCoord]] = {}
-        self._pixel_cache: dict[str, Any] = {}
+
+    def _repr_when(self) -> str:
+        """How many frames, from when, over how long."""
+        start = self.times[0].utc.isot.removesuffix(".000")
+        if self.nobs < 2:
+            return f"1 time, {start}"
+        seconds = float((self.times[-1] - self.times[0]).to_value("s"))
+        return f"{self.nobs} times, {start} +{_format_span(seconds)}"
+
+    def _repr_target(self) -> str:
+        """Where the target is on the sky, and whether it is actually up."""
+        icrs = self.target_icrs.icrs
+        alt = self._target_alt_deg
+        lo, hi = float(alt.min()), float(alt.max())
+        where = f"alt={lo:.2f} deg" if lo == hi else f"alt {lo:.2f} to {hi:.2f} deg"
+        if hi < 0.0:
+            where += " (below horizon)"
+        elif lo < 0.0:
+            where += " (partly below horizon)"
+        return f"ra={icrs.ra.deg:.4f} dec={icrs.dec.deg:.4f} deg, {where}"
+
+    def _repr_site(self) -> str:
+        """Where the observer is."""
+        parts = [
+            f"lon={self.location.lon.deg:.4f} lat={self.location.lat.deg:.4f} deg",
+            f"height={self.height_km:.3g} km",
+        ]
+        if self._refract_pointing:
+            parts.append("refracted pointing")
+        parts += [f"{key}={value}" for key, value in self._altaz_kwargs.items()]
+        return ", ".join(parts)
+
+    def __repr__(self) -> str:
+        """When, where and at what geometry, one per line."""
+        return "\n".join(
+            [
+                f"Observation({self._repr_when()})",
+                f"  target  {self._repr_target()}",
+                f"  site    {self._repr_site()}",
+                f"  geo     {self.geo!r}",
+            ]
+        )
 
     @staticmethod
     def _build_pointing(
         target_icrs: SkyCoord, altaz_frames: list[AltAz]
-    ) -> tuple[list[SkyCoord], list[np.ndarray]]:
-        """Compute per-observation AltAz targets and pointing matrices."""
-        targets_altaz = [target_icrs.transform_to(af) for af in altaz_frames]
-        pointing_matrices = [rotation_matrix_from_altaz(t.az.rad, t.alt.rad) for t in targets_altaz]
-        return targets_altaz, pointing_matrices
+    ) -> tuple[list[np.ndarray], np.ndarray]:
+        """Per-observation pointing matrices and the target altitudes behind them.
+
+        Parameters
+        ----------
+        target_icrs : SkyCoord
+            Scalar target.
+        altaz_frames : list of AltAz
+            One frame per observation.
+
+        Returns
+        -------
+        matrices : list of ndarray, each shape (3, 3)
+        alt_deg : ndarray, shape (nobs,)
+            Target altitude in each frame, kept for :meth:`__repr__`.
+        """
+        targets = [target_icrs.transform_to(af) for af in altaz_frames]
+        matrices = [rotation_matrix_from_altaz(t.az.rad, t.alt.rad) for t in targets]
+        return matrices, np.array([t.alt.deg for t in targets])
 
     @staticmethod
     def _build_fov_coords(
-        geom: Geometry, pointing_matrices: list[np.ndarray], altaz_frames: list[AltAz]
+        geo: Geometry, pointing_matrices: list[np.ndarray], altaz_frames: list[AltAz]
     ) -> list[SkyCoord]:
-        """Build FOV grid coordinates in AltAz for each observation."""
+        """FOV grid coordinates in AltAz, one SkyCoord per observation."""
         fov_coords = []
         for R, af in zip(pointing_matrices, altaz_frames, strict=True):
-            az, alt = offset_to_altaz(geom.X, geom.Y, R)
+            az, alt = offset_to_altaz(geo.X, geo.Y, R)
             fov_coords.append(SkyCoord(az=az, alt=alt, unit="rad", frame=af))
         return fov_coords
-
-    @staticmethod
-    def _compute_scattering_angles(
-        fov_coords: list[SkyCoord], hp_coords_altaz: SkyCoord
-    ) -> np.ndarray:
-        """Compute scattering angles between FOV grid and hemisphere pixels."""
-        return np.stack(
-            [
-                angular_separation(
-                    fc.az.rad[:, :, np.newaxis],
-                    fc.alt.rad[:, :, np.newaxis],
-                    hp_coords_altaz.az.rad[np.newaxis, np.newaxis, :],
-                    hp_coords_altaz.alt.rad[np.newaxis, np.newaxis, :],
-                )
-                for fc in fov_coords
-            ],
-            axis=0,
-        )
 
     @property
     def height_km(self) -> float:
         """Observatory height in km."""
         return self.location.height.to("km").value
 
-    def register_frame(self, key: str, frame: Any, extractor: Callable[..., Any]) -> None:
-        """Register a new coordinate frame for lazy computation.
-
-        Parameters
-        ----------
-        key : str
-            Name for this coordinate system (e.g., 'galactic').
-        frame : astropy frame or str
-            Target frame for coordinate transforms.
-        extractor : callable
-            Function (skycoord_in_frame) -> (lon_rad, lat_rad).
-        """
-        self._frames[key] = (frame, extractor)
-
     def get_sky_coords(self, key: str) -> list[SkyCoord]:
-        """Get sky hemisphere coordinates in the given frame (lazy, cached).
+        """Hemisphere coordinates in the given frame, computed once and cached.
 
         Parameters
         ----------
         key : str
-            Frame key (e.g., 'icrs', 'sref', or any registered frame).
+            Frame key: ``'icrs'`` or ``'sref'``.
 
         Returns
         -------
@@ -213,11 +272,11 @@ class Observation:
             One per observation, each with nsky points.
         """
         if key not in self._sky_cache:
-            frame, _ = self._frames[key]
+            frame, _ = _BUILTIN_FRAMES[key]
             self._sky_cache[key] = [
                 SkyCoord(
-                    self.geom.lon,
-                    self.geom.lat,
+                    self.geo.lon,
+                    self.geo.lat,
                     unit="rad",
                     frame=af,
                 ).transform_to(frame)
@@ -226,32 +285,22 @@ class Observation:
         return self._sky_cache[key]
 
     def _sky_coords_jax(self, key: str, obs_idx: int) -> jax.Array:
-        """Get sky coords as a jax array (nsky, 2) for a single observation."""
+        """Sky coordinates of one observation as a ``(nsky, 2)`` jax array."""
         coords = self.get_sky_coords(key)
-        _, extractor = self._frames[key]
+        _, extractor = _BUILTIN_FRAMES[key]
         lon, lat = extractor(coords[obs_idx])
         return jnp.stack([jnp.array(lon), jnp.array(lat)], axis=-1)
 
-    def _pixel_coords_jax(self, key: str, result_altaz: SkyCoord) -> jax.Array:
-        """Get pixel coords as a jax array (npix, 2) for a single observation."""
-        frame, extractor = self._frames[key]
-        result = result_altaz.transform_to(frame)
-        lon, lat = extractor(result)
-        return jnp.stack([jnp.array(lon), jnp.array(lat)], axis=-1)
-
     def get_render_geometry(self) -> list[RenderGeometry]:
-        """Build a list of single-observation RenderGeometry.
+        """Build the per-observation render geometries.
 
         Returns
         -------
-        list[RenderGeometry]
-            One per observation. Each contains single-obs geometry with
-            no leading nobs axis. Suitable for direct use in Scene.render()
-            or for stacking/vmapping by the caller.
+        list of RenderGeometry
+            One per observation, with no leading ``nobs`` axis.
         """
-        # AltAz sky coords (hemisphere grid)
         altaz_sky = jnp.stack(
-            [jnp.array(self.geom.lon), jnp.array(self.geom.lat)],
+            [jnp.array(self.geo.lon), jnp.array(self.geo.lat)],
             axis=-1,
         )
 
@@ -265,15 +314,14 @@ class Observation:
                     [jnp.array(self.fov_coords[i].az.rad), jnp.array(self.fov_coords[i].alt.rad)],
                     axis=-1,
                 ),
-                scattering_angle=jnp.array(self.scattering_angle[i]),
                 height_km=jnp.array(self.height_km),
-                hemisphere_mask=jnp.array(self.geom.mask),
+                hemisphere_mask=jnp.array(self.geo.mask),
             )
 
             geometries.append(
                 RenderGeometry(
-                    sky=sky,
-                    pointing_matrix=jnp.array(self.pointing_matrices[i]),
+                    sky=PerObs(sky),
+                    pointing_matrix=PerObs(jnp.array(self.pointing_matrices[i])),
                 )
             )
 

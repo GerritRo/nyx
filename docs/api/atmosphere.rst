@@ -10,7 +10,7 @@ Single Scattering
    :allowed-package-names: nyx
 
 Components
--------
+----------
 
 .. automodapi:: nyx.atmosphere.components
    :no-inheritance-diagram:

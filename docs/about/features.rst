@@ -70,9 +70,6 @@ reusable physical components:
 - **Airmass models** including Kasten & Young (1989) and the plane-parallel
   approximation.
 
-A lightweight :class:`~nyx.atmosphere.HGNoAbsorption` variant is available for
-fast experiments without absorption.
-
 Instrument response
 -------------------
 
@@ -81,32 +78,31 @@ spectral response:
 
 - **Effective-aperture instrument** (:class:`~nyx.instrument.EffectiveApertureInstrument`)
   with a wavelength-dependent bandpass and per-pixel efficiency.
-- **Mirror misalignment** support
-  (:class:`~nyx.instrument.EffectiveApertureMisalignmentInstrument`) for
-  modelling and fitting mirror misalignment effects.
-- **Save/load** of instrument definitions to HDF5
-  (:func:`~nyx.instrument.save_instrument`, :func:`~nyx.instrument.load_instrument`).
+- **Built from a ray trace**: an
+  :class:`~nyx.instrument.EffectiveApertureTable` written by iactrace is the
+  instrument's stored form, so a scan is run once and reloaded thereafter
+  (:func:`~nyx.instrument.load_aperture_table`).
 
 Flexible spectral models
 ------------------------
 
 Source spectra are described by composable spectral models
-(:mod:`nyx.core.spectral`):
+(:mod:`nyx.spectra`):
 
-- **Stored spectra** (:class:`~nyx.core.StoredSpectrum`) from empirical or
+- **Stored spectra** (:class:`~nyx.spectra.StoredSpectrum`) from empirical or
   template libraries.
-- **Parametric spectra** (:class:`~nyx.core.ParametricSpectrum`) driven by a
+- **Parametric spectra** (:class:`~nyx.spectra.ParametricSpectrum`) driven by a
   user-supplied, differentiable function of physical conditions.
-- **Pass-through spectra** (:class:`~nyx.core.PassThroughSpectrum`) for sources
+- **Pass-through spectra** (:class:`~nyx.spectra.PassThroughSpectrum`) for sources
   that already carry per-wavelength radiance.
 - Flux-conserving resampling onto the model wavelength grid
-  (:func:`~nyx.core.resample_flux`).
+  (:func:`~nyx.spectra.resample_flux`).
 
 nyx bundles solar, stellar (Pickles 1998), and empirical spectral templates,
 together with CALSPEC standards and SVO filter profiles (see :doc:`data`).
 
-Parameter handling and fitting
-------------------------------
+Parameter handling and inference
+--------------------------------
 
 Model parameters are differentiable objects with explicit
 characteristic scales (:class:`~nyx.core.Parameter`), which keeps the optimiser
@@ -117,10 +113,12 @@ well-conditioned across physically disparate quantities:
   :func:`~nyx.core.freeze_all`, :func:`~nyx.core.unfreeze_all`) to control what
   is fit.
 - **Automatic scaling** of parameters (:func:`~nyx.core.autoscale`).
-- **Optimisation** via the :class:`~nyx.core.Optimizer`, built on
+- **Optimisation** via the :class:`~nyx.infer.Optimizer`, built on
   `Optimistix <https://docs.kidger.site/optimistix/>`_, with multi-target joint
-  fitting through :class:`~nyx.core.MultiTargetFit`.
-- **Uncertainty estimation** with :func:`~nyx.core.parameter_errors`.
+  fitting through :class:`~nyx.infer.MultiTargetFit`.
+- **Uncertainty estimation** with :func:`~nyx.infer.parameter_errors`.
+- **Posterior sampling** with :func:`~nyx.infer.scene_model`, which reads the
+  same frozen/unfrozen switch and hands the model to NumPyro.
 
 Observation and geometry model
 ------------------------------
@@ -129,5 +127,6 @@ Observation and geometry model
   configurable resolution (``nside``), in-scattering grid, and field of view.
 - **Observation description** (:class:`~nyx.core.Observation`) tying together
   observer location, time, target, geometry and atmospheric conditions.
+
 See :doc:`/api/index` for the complete API reference, and the
 :doc:`/examples/index` for worked end-to-end examples.

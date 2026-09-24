@@ -69,7 +69,7 @@ This walks you through an interactive prompt:
    chore: Other changes that don't modify src or test files
 
 ? What is the scope of this change? (press enter to skip)
-  core, atmosphere, emitter, instrument, utils
+  core, atmosphere, emitter, infer, instrument, utils
 
 ? Write a short, imperative description of the change:
   > add lunar phase correction to Jones2013
@@ -117,7 +117,8 @@ messages at release time via `cz bump --changelog`.
 ruff check nyx                          # Lint
 ruff check --fix nyx                    # Lint + auto-fix
 ruff format nyx                         # Format
-mypy nyx                                # Type check
+mypy nyx/core                           # Type check core
+mypy nyx/infer                          # Type check infer
 pytest                                  # Tests
 pytest --cov=nyx --cov-report=html      # Coverage report
 ```

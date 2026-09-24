@@ -1,118 +1,91 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Iterator
 from typing import Any
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from nyx.core.parameter import Parameter, _is_param
+from nyx.core.parameter import is_parameter
+from nyx.core.records import PerObs
 
-__all__ = ["per_obs_filter", "tile_per_obs", "_navigate"]
-
-
-def _navigate(obj: Any, path: tuple[Any, ...]) -> Any:
-    """Follow a path tuple through a mix of eqx.Modules, dicts, lists, tuples.
-
-    Shared utility for :meth:`nyx.core.scene.Scene.set` / ``set_params``.
-    """
-    for step in path:
-        if isinstance(step, int) or isinstance(obj, dict):
-            obj = obj[step]
-        else:
-            obj = getattr(obj, step)
-    return obj
+__all__ = [
+    "per_obs_filter",
+    "select_obs",
+    "tile_per_obs",
+]
 
 
-def _find_declared_paths(
-    root: Any, declaration: str, _prefix: tuple[Any, ...] = ()
-) -> Iterator[tuple[Any, ...]]:
-    """Yield path tuples to every eqx.Module whose ``declaration`` attribute
-    is a non-empty tuple.  Does not descend into :class:`Parameter`
-    instances (they carry their own metadata)."""
-    if isinstance(root, Parameter):
-        return
-    if isinstance(root, eqx.Module) and getattr(root, declaration, None):
-        yield _prefix
-    if isinstance(root, eqx.Module):
-        for name in root.__dataclass_fields__:
-            yield from _find_declared_paths(
-                getattr(root, name),
-                declaration,
-                _prefix + (name,),
-            )
-    elif isinstance(root, dict):
-        for key, child in root.items():
-            yield from _find_declared_paths(
-                child,
-                declaration,
-                _prefix + (key,),
-            )
-    elif isinstance(root, (list, tuple)):
-        for i, child in enumerate(root):
-            yield from _find_declared_paths(
-                child,
-                declaration,
-                _prefix + (i,),
-            )
+def _is_marked(x: Any) -> bool:
+    return is_parameter(x) or isinstance(x, PerObs)
 
 
 def per_obs_filter[T](tree: T) -> T:
     """Boolean mask for every per-observation leaf in *tree*.
 
-    Marks True in two cases:
+    True for the ``factor`` of a :class:`~nyx.core.parameter.Parameter` with
+    ``per_obs=True``, and for everything below a
+    :class:`~nyx.core.records.PerObs`.
 
-    - The ``factor`` leaf of any :class:`Parameter` with ``per_obs=True``.
-    - Every leaf under a field listed in a containing eqx.Module's
-      ``_per_obs`` class tuple.
+    Parameters
+    ----------
+    tree : pytree
+
+    Returns
+    -------
+    pytree
+        A filter spec: the same shape as *tree*, with a bool at every leaf and
+        a single ``True`` standing in for a whole ``PerObs`` subtree.
     """
 
     def at_leaf(x: Any) -> Any:
-        if _is_param(x):
+        if is_parameter(x):
             return dataclasses.replace(x, factor=bool(x.per_obs))
-        return False
+        return isinstance(x, PerObs)
 
-    filt = jax.tree.map(at_leaf, tree, is_leaf=_is_param)
+    return jax.tree.map(at_leaf, tree, is_leaf=_is_marked)
 
-    for path in _find_declared_paths(tree, "_per_obs"):
-        component = _navigate(tree, path)
-        for field_name in component._per_obs:
-            full_path = path + (field_name,)
-            subtree = _navigate(filt, full_path)
 
-            def _const_true(_: object) -> bool:
-                return True
+def select_obs[T](tree: T, index: int) -> T:
+    """Slice observation *index* out of a stacked tree; inverse of :func:`tile_per_obs`.
 
-            replacement = jax.tree.map(
-                _const_true,
-                subtree,
-                is_leaf=_is_param,
-            )
+    Parameters
+    ----------
+    tree : pytree
+    index : int
 
-            def _at_path(m: object, _p: tuple[Any, ...] = full_path) -> object:
-                return _navigate(m, _p)
-
-            filt = eqx.tree_at(_at_path, filt, replacement)
-    return filt
+    Returns
+    -------
+    pytree
+        The same tree with the leading observation axis dropped from every
+        per-observation leaf, and everything else untouched.
+    """
+    per_obs, shared = eqx.partition(tree, per_obs_filter(tree))
+    return eqx.combine(shared, jax.tree.map(lambda x: x[index], per_obs))
 
 
 def tile_per_obs[T](tree: T, nobs: int) -> T:
-    """Tile the ``factor`` of every :class:`Parameter` with ``per_obs=True``
-    to leading shape ``(nobs, ...)``.
+    """Give every ``per_obs`` Parameter in *tree* a leading ``(nobs, ...)`` axis.
 
-    Data containers (:class:`SourceObsData`, :class:`RenderGeometry`) do
-    their own stacking at construction time, so this function only handles
-    the Parameter path.
+    Parameters
+    ----------
+    tree : pytree
+    nobs : int
+
+    Returns
+    -------
+    pytree
+        The same tree; data wrapped in :class:`~nyx.core.records.PerObs`,
+        which stacks itself at construction, is untouched.
     """
 
     def at_leaf(x: Any) -> Any:
-        if _is_param(x) and x.per_obs:
+        if is_parameter(x) and x.per_obs:
             return dataclasses.replace(
                 x,
                 factor=jnp.stack([x.factor] * nobs),
             )
         return x
 
-    return jax.tree.map(at_leaf, tree, is_leaf=_is_param)
+    return jax.tree.map(at_leaf, tree, is_leaf=is_parameter)

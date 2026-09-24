@@ -12,8 +12,9 @@ from .components import (
     tau_mie,
     tau_ozone,
     tau_rayleigh,
+    thin_shell_airmass,
 )
-from .single_scattering import HGNoAbsorption, SingleScattering
+from .single_scattering import SingleScattering
 
 __all__ = [
     "rayleigh_phase",
@@ -21,12 +22,12 @@ __all__ = [
     "gradation_function",
     "plane_parallel",
     "kasten_young_1989",
+    "thin_shell_airmass",
     "AIRMASS_FUNCTIONS",
     "tau_rayleigh",
     "tau_mie",
     "tau_ozone",
     "SingleScattering",
-    "HGNoAbsorption",
     "ScatteringComponent",
     "RayleighComponent",
     "HenyeyGreensteinComponent",

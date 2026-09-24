@@ -1,9 +1,11 @@
-from .effective_aperture import EffectiveApertureInstrument, EffectiveApertureMisalignmentInstrument
-from .io import load_instrument, save_instrument
+from .aperture_table import EffectiveApertureTable, load_aperture_table, tabulated_bandpass
+from .effective_aperture import EffectiveApertureInstrument
+from .interpolation import PixelLattice
 
 __all__ = [
     "EffectiveApertureInstrument",
-    "EffectiveApertureMisalignmentInstrument",
-    "save_instrument",
-    "load_instrument",
+    "EffectiveApertureTable",
+    "PixelLattice",
+    "load_aperture_table",
+    "tabulated_bandpass",
 ]

@@ -7,63 +7,84 @@ import numpy as np
 from astropy.constants import c, h
 from numpy.typing import ArrayLike
 
+__all__ = [
+    "ANGLE",
+    "FLUX",
+    "RADIANCE",
+    "WAVELENGTH",
+    "energy_flux_to_photon_flux",
+    "to_angle_rad",
+    "to_wavelength_nm",
+]
+
 # Internal unit conventions
 WAVELENGTH = u.nm
 RADIANCE = u.photon / (u.s * u.m**2 * u.nm * u.sr)
 FLUX = u.photon / (u.s * u.m**2 * u.nm)
-RATE = u.photon / u.s
 ANGLE = u.rad
-SOLID_ANGLE = u.sr
 
 
-# Conversions
-
-
-def to_wavelength_nm(quantity: ArrayLike | u.Quantity) -> jax.Array:
-    """Convert any wavelength quantity to a raw array in nm."""
-    if isinstance(quantity, u.Quantity):
-        return jnp.asarray(quantity.to(WAVELENGTH).value)
-    return jnp.asarray(quantity)  # assume already nm
-
-
-def to_radiance(quantity: ArrayLike | u.Quantity) -> jax.Array:
-    """Convert photon-radiance quantity to raw array in internal units."""
-    if isinstance(quantity, u.Quantity):
-        return jnp.asarray(quantity.to(RADIANCE).value)
-    return jnp.asarray(quantity)
-
-
-def to_flux(quantity: ArrayLike | u.Quantity) -> jax.Array:
-    """Convert photon-flux quantity to raw array in internal units."""
-    if isinstance(quantity, u.Quantity):
-        return jnp.asarray(quantity.to(FLUX).value)
-    return jnp.asarray(quantity)
-
-
-def to_angle_rad(quantity: ArrayLike | u.Quantity) -> jax.Array:
-    """Convert any angle quantity to raw array in radians."""
-    if isinstance(quantity, u.Quantity):
-        return jnp.asarray(quantity.to(ANGLE).value)
-    return jnp.asarray(quantity)
-
-
-def energy_flux_to_photon_flux(wavelength_nm: ArrayLike, energy_flux: u.Quantity) -> jax.Array:
-    """
-    Convert energy flux (W/m^2/nm) to photon flux (photon/s/m^2/nm).
+def _to_unit(quantity: ArrayLike | u.Quantity, unit: u.UnitBase) -> jax.Array:
+    """Raw array of *quantity* in *unit*; a plain array is assumed to be in it.
 
     Parameters
     ----------
-    wavelength_nm : array
-        Wavelengths in nm (raw array).
-    energy_flux : astropy Quantity
-        Energy flux with units (e.g. W/m^2/nm or W/m^2/nm/sr).
+    quantity : array-like or astropy Quantity
+    unit : astropy unit
 
     Returns
     -------
-    array
-        Photon flux in internal units (raw array).
+    jax.Array
     """
-    wvl_q = np.asarray(wavelength_nm) * u.nm
+    if isinstance(quantity, u.Quantity):
+        return jnp.asarray(quantity.to(unit).value)
+    return jnp.asarray(quantity)
+
+
+def to_wavelength_nm(quantity: ArrayLike | u.Quantity) -> jax.Array:
+    """Convert any wavelength quantity to a raw array in nm.
+
+    Parameters
+    ----------
+    quantity : array-like or astropy Quantity
+
+    Returns
+    -------
+    jax.Array
+    """
+    return _to_unit(quantity, WAVELENGTH)
+
+
+def to_angle_rad(quantity: ArrayLike | u.Quantity) -> jax.Array:
+    """Convert any angle quantity to a raw array in radians.
+
+    Parameters
+    ----------
+    quantity : array-like or astropy Quantity
+
+    Returns
+    -------
+    jax.Array
+    """
+    return _to_unit(quantity, ANGLE)
+
+
+def energy_flux_to_photon_flux(wvls: ArrayLike, energy_flux: u.Quantity) -> jax.Array:
+    """Convert energy flux to photon flux, per steradian or not.
+
+    Parameters
+    ----------
+    wvls : array-like
+        Wavelengths in nm.
+    energy_flux : astropy Quantity
+        Energy flux, e.g. W/m^2/nm or W/m^2/nm/sr.
+
+    Returns
+    -------
+    jax.Array
+        Photon flux in :data:`FLUX` or :data:`RADIANCE` units.
+    """
+    wvl_q = np.asarray(wvls) * u.nm
     photon_energy = (h * c / wvl_q).to(u.J)
 
     # Detect if this is a radiance (has sr in denominator)

@@ -33,6 +33,19 @@ nyx is Astropy-aware: physical inputs can be supplied as
    fov = 3.5 * u.deg          # field of view half-angle
    wvls = [300, 400, 500] * u.nm
 
+Configuring JAX
+---------------
+
+nyx does not change JAX's global configuration on import. The render 
+integrates over wavelength and sky position, so on GPU and TPU the 
+reduced-precision matmuls JAX allows by default cost accuracy.
+
+.. code-block:: python
+
+   import nyx
+
+   nyx.configure()   # sets jax_default_matmul_precision to "highest"
+
 The Geometry
 ------------
 
@@ -70,22 +83,24 @@ ESO SkyCalc, Gaia DR3, Jones 2013):
    from astropy.coordinates import EarthLocation, SkyCoord
    from astropy.time import Time
 
-   from nyx.core import Scene
-   from nyx.core.geometry import Geometry
-   from nyx.core.observation import Observation
-   from nyx.instrument import EffectiveApertureInstrument
-   from nyx.atmosphere.single_scattering import HGNoAbsorption
-   from nyx.emitter import Moon, Airglow, ZodiacalLight, Stars
+   import nyx
+   from nyx import (
+       Airglow, EffectiveApertureInstrument, Geometry, Moon, Observation,
+       Scene, SingleScattering, Stars, ZodiacalLight,
+   )
+
+   nyx.configure()
 
    # 0. Shared render geometry
    geo = Geometry(wvls=jnp.linspace(300, 700, 50) * u.nm,
                   nside=16, ngrid=2, fov=3.5 * u.deg)
 
-   # 1. Instrument (loaded from an HDF5 definition)
-   instrument = EffectiveApertureInstrument.load("instrument.h5", geo)
+   # 1. Instrument, from an iactrace effective-aperture scan
+   instrument = EffectiveApertureInstrument.from_iactrace_table(
+       geo, "CT1_aperture.npz")
 
    # 2. Atmosphere
-   atmosphere = HGNoAbsorption(geo)
+   atmosphere = SingleScattering.from_hg(geo)
 
    # 3. Emitters, keyed by name
    sources = {
@@ -115,21 +130,6 @@ instrument is automatically named ``"instrument"``:
 
    pixel_rates = rates["instrument"]  # shape (n_obs, n_pixels)
 
-Visualizing the Result
-----------------------
-
-Because the model is built on JAX arrays, results drop straight into the usual
-plotting tools:
-
-.. code-block:: python
-
-   import matplotlib.pyplot as plt
-
-   plt.hist(pixel_rates[0])
-   plt.xlabel("photon rate [photon/s]")
-   plt.ylabel("pixels")
-   plt.show()
-
 Fitting the Model to Data
 -------------------------
 
@@ -142,11 +142,10 @@ the scene pytree) to choose what is trained.
 .. code-block:: python
 
    import optimistix as optx
-   from nyx.core import Optimizer, freeze_all, unfreeze
+   from nyx.core import freeze_all, unfreeze
+   from nyx.infer import Optimizer
 
    # Start from everything frozen, then unfreeze what you want to fit.
-   # The selector returns the Parameter to train, e.g. the instrument
-   # pixel efficiency:
    scene = freeze_all(scene)
    scene = unfreeze(scene, lambda s: s.instruments["instrument"].pixel_efficiency)
 
@@ -161,21 +160,21 @@ the scene pytree) to choose what is trained.
    errors = opt.errors(fitted)
 
 For jointly fitting several targets/observations, see
-:class:`~nyx.core.MultiTargetFit`.
+:class:`~nyx.infer.multitarget.MultiTargetFit`.
 
-Saving and Loading a Fit
-------------------------
-
-Fitted scenes can be serialised to HDF5 and reloaded later. The observation
-dict is required because the scene keeps only precomputed JAX pytrees, not the
-original Astropy objects:
+Saving a Fit
+------------
 
 .. code-block:: python
 
-   from nyx.core import save_fit, load_fit
+   import numpy as np
 
-   save_fit("fit.h5", fitted, {"instrument": obs})
-   result = load_fit("fit.h5")
+   from nyx.core import dump_params, set_parameters
+
+   np.savez("fit.npz", **dump_params(fitted))
+
+   # to restore them onto a scene rebuilt the same way:
+   restored = set_parameters(scene, dict(np.load("fit.npz")))
 
 Next Steps
 ----------

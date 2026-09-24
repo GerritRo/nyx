@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import dataclasses
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import equinox as eqx
@@ -8,277 +7,104 @@ import jax
 import jax.numpy as jnp
 
 from nyx.core.filters import tile_per_obs
-from nyx.core.spectral import SpectralModel
+from nyx.core.parameter import Parameter
+from nyx.core.records import AtmosphereResult, PointSourceData, SkyGeometry, SourceObsData
 
 if TYPE_CHECKING:
-    from nyx.core.observation import Observation, SkyGeometry
-    from nyx.core.parameter import Parameter
+    from nyx.core.observation import Observation
 
-# Source protocols
-
-
-class PointSourceData(eqx.Module):
-    """Point source data for the render loop (single observation)."""
-
-    spectra: jax.Array  # (n_sources, n_wvl)
-    coords: jax.Array  # (n_sources, 2) AltAz (az, alt) in radians
+__all__ = [
+    "AtmosphereModel",
+    "EmitterLike",
+    "InstrumentModel",
+    "SkySource",
+]
 
 
 class SkySource(eqx.Module):
-    """Source model: shared physics that maps conditions to photons.
+    """Source model: the shared physics mapping conditions to photons.
 
-    A SkySource is stored at the :class:`Scene` level.  It holds
-    trainable parameters (spectral models, scaling factors) and
-    implements the physics that maps observation data into radiance
-    and point-source spectra.
-
-    The standard implementation is :class:`SourceModel`, which routes
-    all computation through a single ``spectral_model(conditions)``
-    call for both diffuse and point-source paths.
+    Stored at the :class:`~nyx.core.scene.Scene` level and holds the
+    trainable spectral parameters.
     """
 
-    def diffuse_radiance(
-        self, geometry: SkyGeometry, obs_data: SourceObsData | None = None
-    ) -> jax.Array | None:
-        """Evaluate diffuse radiance at geometry positions.
+    def diffuse_radiance(self, obs_data: SourceObsData | None = None) -> jax.Array | None:
+        """Diffuse radiance at the hemisphere positions.
 
         Parameters
         ----------
-        geometry : SkyGeometry
-        obs_data : eqx.Module or None
-            Per-instrument observation data.
+        obs_data : SourceObsData or None
 
         Returns
         -------
-        jax.Array or None
-            Radiance (..., n_wvl), or None if no diffuse component.
+        jax.Array, shape (..., n_wvl), or None
+            ``None`` if this source has no diffuse component.
         """
         return None
 
     def point_sources(self, obs_data: SourceObsData | None = None) -> PointSourceData | None:
-        """Return point source data, or None if no point component.
+        """Point sources.
 
         Parameters
         ----------
-        obs_data : eqx.Module or None
-            Per-instrument observation data.
+        obs_data : SourceObsData or None
+
+        Returns
+        -------
+        PointSourceData or None
+            ``None`` if this source has no point component.
         """
         return None
 
 
-# Observation data
-
-
-class SourceObsData(eqx.Module):
-    """Per-instrument observation data for any sky source.
-
-    All emitter builders produce a ``SourceObsData`` from their
-    ``prepare(obs)`` method.  The conditions are evaluated through
-    the source model's ``spectral_model`` at render time.
-
-    All fields are optional. Emitters populate only the paths they use.
-    Diffuse-only emitters set ``diffuse_conditions``; point-source-only
-    emitters set ``source_conditions`` + ``source_coords``; hybrid
-    emitters set both.
-
-    Parameters
-    ----------
-    diffuse_conditions : jax.Array or None
-        Per-pixel conditions fed to ``spectral_model`` for diffuse
-        radiance, or None if no diffuse component.
-    diffuse_norm : jax.Array
-        Multiplicative normalization applied after spectral evaluation
-        (e.g. ``1 / pixel_area`` for flux → radiance conversion).
-    source_conditions : jax.Array or None
-        Per-source conditions fed to ``spectral_model`` for point
-        sources, or None if no point sources.
-    source_coords : jax.Array or None
-        Point source positions ``(nobs, n_src, 2)`` in AltAz, or None.
-    direct : bool
-        Whether diffuse radiance goes through line-of-sight extinction
-        (the direct path).  ``True`` for normal diffuse sources
-        (airglow, zodiacal); ``False`` for catalog sources whose direct
-        light is handled by quasi-point sources.  Map scattering is
-        always applied regardless of this flag.
-    inscatter : bool
-        Whether to compute individual in-scattering for point sources
-        via ``scatter_sources``.  ``True`` for sources with no map
-        representation (moon); ``False`` when in-scattering is already
-        captured by the diffuse map (star catalogs).
-    """
-
-    diffuse_conditions: jax.Array | None = None
-    diffuse_norm: jax.Array = eqx.field(default_factory=lambda: jnp.array(1.0))
-    source_conditions: jax.Array | None = None
-    source_coords: jax.Array | None = None
-    direct: bool = eqx.field(static=True, default=True)
-    inscatter: bool = eqx.field(static=True, default=False)
-    _per_obs: tuple[str, ...] = eqx.field(static=True, default=())
-
-    def __check_init__(self) -> None:
-        valid = {f.name for f in dataclasses.fields(self) if f.name != "_per_obs"}
-        bad = set(self._per_obs) - valid
-        if bad:
-            raise ValueError(
-                f"SourceObsData._per_obs references unknown fields: {bad!r}. "
-                f"Valid fields: {valid!r}"
-            )
-
-
-# Emitter builder protocol
-
-
 @runtime_checkable
-class EmitterBuilder(Protocol):
-    """Protocol for emitter builder classes.
+class EmitterLike(Protocol):
+    """Protocol for emitter builders, consumed by :meth:`Scene.build`.
 
-    Emitter builders handle heavyweight I/O (data loading, catalog
-    downloads, coordinate transforms) at construction time and expose
-    two methods consumed by :meth:`Scene.build`:
-
-    - ``model()`` returns a shared :class:`SourceModel` stored in the
-      scene pytree (holds trainable spectral parameters).
-    - ``prepare(obs)`` returns a :class:`SourceObsData` with precomputed
-      per-observation conditions and rendering flags (``direct``,
-      ``inscatter``) for the render loop.
+    ``model()`` returns the shared :class:`SkySource` stored in the scene
+    pytree; ``prepare(obs)`` the per-observation
+    :class:`~nyx.core.records.SourceObsData`.
     """
 
-    def model(self) -> SourceModel: ...
+    def model(self) -> SkySource: ...
 
     def prepare(self, obs: Observation) -> SourceObsData: ...
 
 
-# Unified source model
-
-
-class SourceModel(SkySource):
-    """Unified source model for all sky sources.
-
-    Routes both diffuse and point-source computation through a single
-    ``spectral_model(conditions)`` call.  Different emitters provide
-    different conditions and spectral models, but the interface is
-    identical.
-    """
-
-    spectral_model: SpectralModel
-
-    def diffuse_radiance(
-        self, geometry: SkyGeometry, obs_data: SourceObsData | None = None
-    ) -> jax.Array | None:
-        if obs_data is None or obs_data.diffuse_conditions is None:
-            return None
-        return obs_data.diffuse_norm * self.spectral_model(obs_data.diffuse_conditions)
-
-    def point_sources(self, obs_data: SourceObsData | None = None) -> PointSourceData | None:
-        if obs_data is not None and obs_data.source_coords is not None:
-            spectra = self.spectral_model(obs_data.source_conditions)
-            return PointSourceData(
-                spectra=spectra,
-                coords=obs_data.source_coords,
-            )
-        return None
-
-
-# Atmosphere protocol
-
-
-class AtmosphereResult(eqx.Module):
-    """Output of atmosphere evaluation.
-
-    Typed intermediate representation consumed by the render loop.
-    Internal details (optical depth, airmass) stay inside the atmosphere.
-
-    The ``extinction_hp`` and ``scattering_map`` arrays cover only
-    the upper hemisphere (``nsky`` pixels in HEALPix RING ordering).
-    ``npix`` stores the full-sphere pixel count so that
-    ``apply_extinction`` can return a full HEALPix map.
-    """
-
-    extinction_hp: jax.Array  # [nsky, n_wvl]   exp(-tau * sec_z)
-    scattering_map: jax.Array  # [grid_y, grid_x, nsky, n_wvl]
-    npix: int = eqx.field(static=True)  # full-sphere HEALPix pixel count
-
-    @property
-    def nsky(self) -> int:
-        """Number of hemisphere sky pixels."""
-        return self.extinction_hp.shape[0]
-
-    @property
-    def n_wvl(self) -> int:
-        """Number of wavelength bins."""
-        return self.extinction_hp.shape[1]
-
-    def apply_extinction(self, sky_radiance: jax.Array, bandpass: jax.Array) -> jax.Array:
-        """Band-integrate sky radiance through line-of-sight extinction.
-
-        Returns a full-sphere HEALPix array (zeros below horizon).
-        Hemisphere pixels occupy indices in RING ordering.
-
-        Parameters
-        ----------
-        sky_radiance : jax.Array, shape (nsky, n_wvl)
-        bandpass : jax.Array, shape (n_wvl,)
-
-        Returns
-        -------
-        jax.Array, shape (npix,)
-        """
-        hp_values = jnp.sum(bandpass * sky_radiance * self.extinction_hp, axis=-1)
-        return jnp.zeros(self.npix).at[: hp_values.shape[0]].set(hp_values)
-
-    def apply_scattering(self, sky_radiance_obs: jax.Array, bandpass: jax.Array) -> jax.Array:
-        """Compute scattered contribution for a single observation.
-
-        Parameters
-        ----------
-        sky_radiance_obs : jax.Array, shape (nsky, n_wvl)
-        bandpass : jax.Array, shape (n_wvl,)
-
-        Returns
-        -------
-        jax.Array, shape (grid_y, grid_x): scattered value per FOV cell.
-        """
-        return jnp.sum(bandpass * sky_radiance_obs * self.scattering_map, axis=(-2, -1))
-
-
 class AtmosphereModel(eqx.Module):
-    """Atmosphere model implementing extinction and scattering.
+    """Extinction and scattering, shared across every instrument in a scene.
 
-    Shared at the :class:`Scene` level across all instruments.
-
-    Trainable quantities are any :class:`~nyx.core.parameter.Parameter`
-    fields the subclass declares; the fitter discovers them automatically.
+    Trainable quantities are the :class:`~nyx.core.parameter.Parameter`
+    fields a subclass declares.
     """
 
     def evaluate(self, sky: SkyGeometry) -> AtmosphereResult:
-        """Compute extinction and scattering for current trainable params.
+        """Extinction and scattering for the current trainable parameters.
 
         Parameters
         ----------
         sky : SkyGeometry
-            Hemisphere altaz, FOV grid altaz, scattering angles.
+
+        Returns
+        -------
+        AtmosphereResult
         """
         raise NotImplementedError
 
     def extinct(self, altitudes: jax.Array, spectra: jax.Array, height_km: jax.Array) -> jax.Array:
-        """Apply extinction to spectra at given sky positions.
-
-        Default: no extinction (returns spectra unchanged). Override
-        to model atmospheric absorption of point sources.
+        """Extinct point-source spectra; the default returns them unchanged.
 
         Parameters
         ----------
         altitudes : jax.Array, shape (n_sources, 1)
-            Source altitudes in radians.
+            Radians.
         spectra : jax.Array, shape (n_sources, n_wvl)
-            Source spectra to extinct.
         height_km : jax.Array
-            Observer height above sea level in km (from SkyGeometry).
+            Observer height above sea level.
 
         Returns
         -------
         jax.Array, shape (n_sources, n_wvl)
-            Extincted spectra.
         """
         return spectra
 
@@ -288,59 +114,103 @@ class AtmosphereModel(eqx.Module):
         source_coords: jax.Array,
         source_spectra: jax.Array,
         bp: jax.Array,
-    ) -> jax.Array | float:
-        """Compute scattered contribution of discrete point sources onto FOV.
+    ) -> jax.Array:
+        """Scatter discrete point sources into the FOV; the default is none.
 
-        Default: no point-source scattering.
+        Parameters
+        ----------
+        sky : SkyGeometry
+        source_coords : jax.Array, shape (n_sources, 2)
+            AltAz in radians.
+        source_spectra : jax.Array, shape (n_sources, n_wvl)
+        bp : jax.Array, shape (n_wvl,)
+            Instrument bandpass.
+
+        Returns
+        -------
+        jax.Array, shape (n_lon, n_lat), or a scalar zero
         """
-        return 0.0
-
-
-# Instrument protocol
+        return jnp.array(0.0)
 
 
 class InstrumentModel(eqx.Module):
     """Sensor that maps sky radiance to detector counts.
 
-    Trainable quantities are :class:`~nyx.core.parameter.Parameter` fields
-    the subclass declares; per-observation axes (e.g. ``shift``,
-    ``rotation``) are marked by setting ``per_obs=True`` on those
-    Parameters, and :func:`nyx.core.filters.tile_per_obs` will broadcast
-    them to ``(nobs, ...)`` at prepare time.
-
-    Every concrete instrument provides an ``efficiency`` Parameter (overall
-    throughput scale); the render pipeline multiplies pixel rates by it.
+    Trainable quantities are the :class:`~nyx.core.parameter.Parameter`
+    fields a subclass declares, with ``per_obs=True`` for those carrying an
+    observation axis.
     """
 
-    if TYPE_CHECKING:
-        # Declared by concrete instruments as an eqx field; part of the
-        # contract relied on by nyx.core.pipeline.render.
-        efficiency: Parameter
+    efficiency: eqx.AbstractVar[Parameter]
 
     def prepare(self, obs: Observation) -> InstrumentModel:
-        """Batch for multi-observation rendering.
+        """Batch for multi-observation rendering; the default tiles ``per_obs`` fields.
 
-        Default: tiles ``_per_obs`` fields to ``(nobs, ...)``.
+        Parameters
+        ----------
+        obs : Observation
+
+        Returns
+        -------
+        InstrumentModel
         """
         return tile_per_obs(self, obs.nobs)
 
     @property
     def bandpass(self) -> jax.Array:
-        """Spectral transmission curve (no efficiency). Shape [n_wvl]."""
+        """Spectral transmission curve, shape ``(n_wvl,)``, excluding efficiency."""
         raise NotImplementedError
 
     def corrected_pm(self, pm: jax.Array) -> jax.Array:
-        """Pointing matrix corrected for detector shift and rotation."""
+        """Pointing matrix corrected for detector shift and rotation.
+
+        Parameters
+        ----------
+        pm : jax.Array, shape (3, 3)
+
+        Returns
+        -------
+        jax.Array, shape (3, 3)
+        """
         return pm
 
     def project_scattered(self, eval_grid_values: jax.Array) -> jax.Array:
-        """Scattering eval grid -> pixel rates. Default: no contribution."""
+        """Scattering eval grid to pixel rates; the default is no contribution.
+
+        Parameters
+        ----------
+        eval_grid_values : jax.Array, shape (n_lon, n_lat)
+
+        Returns
+        -------
+        jax.Array, shape (n_pixels,), or scalar
+        """
         return jnp.array(0.0)
 
     def project_diffuse(self, hp_values: jax.Array, pm: jax.Array) -> jax.Array:
-        """HEALPix sky values -> pixel rates. Shape [n_pixels]."""
+        """HEALPix sky values to pixel rates.
+
+        Parameters
+        ----------
+        hp_values : jax.Array, shape (npix,)
+        pm : jax.Array, shape (3, 3)
+
+        Returns
+        -------
+        jax.Array, shape (n_pixels,)
+        """
         raise NotImplementedError
 
     def project_catalog(self, source_coords: jax.Array, source_fluxes: jax.Array) -> jax.Array:
-        """Point source (coords, fluxes) -> pixel rates. Default: no contribution."""
+        """Point sources to pixel rates; the default is no contribution.
+
+        Parameters
+        ----------
+        source_coords : jax.Array, shape (n_sources, 2)
+        source_fluxes : jax.Array, shape (n_sources,)
+
+        Returns
+        -------
+        jax.Array, shape (n_pixels,), or scalar
+        """
         return jnp.array(0.0)

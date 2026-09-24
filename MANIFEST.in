@@ -1,0 +1,8 @@
+include LICENSE
+include CITATION.cff
+include CHANGELOG.md
+include CONTRIBUTING.md
+recursive-include licenses *.rst
+recursive-include nyx/data *.dat
+recursive-include tests *.py
+global-exclude *.py[cod] __pycache__/*

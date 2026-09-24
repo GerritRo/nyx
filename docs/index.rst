@@ -11,18 +11,19 @@ enabling parameter estimation through HMC fitting or gradient-based optimization
    import jax.numpy as jnp
    import astropy.units as u
 
-   from nyx.core import Scene
-   from nyx.core.geometry import Geometry
-   from nyx.core.observation import Observation
-   from nyx.instrument import EffectiveApertureInstrument
-   from nyx.atmosphere.single_scattering import HGNoAbsorption
-   from nyx.emitter import Moon, Airglow, ZodiacalLight, Stars
+   import nyx
+   from nyx import (
+      Airglow, EffectiveApertureInstrument, Geometry, Moon, Observation,
+      Scene, SingleScattering, Stars, ZodiacalLight,
+   )
+
+   nyx.configure()   # matmul precision; see the quickstart
 
    geo = Geometry(wvls=jnp.linspace(300, 700, 50) * u.nm,
                   nside=16, ngrid=2, fov=3.5 * u.deg)
 
-   instrument = EffectiveApertureInstrument.load("instrument.h5", geo)
-   atmosphere = HGNoAbsorption(geo)
+   instrument = EffectiveApertureInstrument.from_iactrace_table(geo, "CT1_aperture.npz")
+   atmosphere = SingleScattering.from_hg(geo)
    sources = {
       'airglow': Airglow.from_eso_skycalc(geo, sfu=100.0),
       'zodiacal': ZodiacalLight.from_leinert1998(geo),
