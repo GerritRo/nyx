@@ -34,7 +34,7 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[dev]"
       - name: Run mypy
-        run: mypy nyx/core --ignore-missing-imports
+        run: mypy nyx/core nyx/infer --ignore-missing-imports
 
   build-docs:
     runs-on: ubuntu-latest

@@ -1,129 +1,101 @@
+from __future__ import annotations
+
 import astropy.units as u
 import healpy as hp
 import jax.numpy as jnp
 import numpy as np
 from astropy.coordinates import ICRS, SkyCoord
-from astropy.utils.data import download_file
+from astropy.time import Time
 
-from nyx.core.coordinates import HEALPixCatalog, rotate_healpix
-from nyx.core.protocols import SourceObsData, set_source_weight
-from nyx.core.spectral import ParametricSpectrum, SpectralModel
-from nyx.emitter._base import BaseEmitter
-from nyx.utils.spectra import Bandpass, PicklesTRDSAtlas1998, create_color_grid
+from nyx.core.records import PerObs, SourceObsData
+from nyx.emitter.catalog import CatalogEmitter
+from nyx.emitter.catalogs import gaia, xhip
+from nyx.emitter.catalogs.astrometry import altaz_track, rotate_healpix
+from nyx.spectra import SpectralModel
+
+__all__ = ["BrightStars", "Stars", "gaia_star_field"]
 
 
-class Stars(BaseEmitter):
-    """Star catalog emitter with resolved bright stars and diffuse map.
+class Stars(CatalogEmitter):
+    """Star catalog emitter with resolved bright stars and a diffuse map.
 
-    The complete sky map provides atmospheric in-scattering via the
-    catalog scattering path.  Bright resolved stars and FOV HEALPix
-    pixels (quasi-point sources) are extracted for direct rendering
-    (extinction + pixel projection).
-
-    Resolved star flux is subtracted from quasi-point pixels to avoid
-    double-counting within the point source path (resolved stars appear
-    both as individual sources and embedded in quasi-point pixel flux).
-    The diffuse map stays complete (no FOV masking). The map-vs-point
-    split handles that separation.
+    The map carries the complete sky and drives in-scattering; stars inside
+    the field of view are additionally rendered as points, and their flux is
+    subtracted from the quasi-point FOV pixels to avoid double-counting.
 
     Parameters
     ----------
     geo : Geometry
         Resolution configuration.
     spectral_model : SpectralModel
-        Maps ``(n_sources, n_cond)`` conditions to
-        ``(n_sources, n_wvl)`` spectra.
-    bright_ra, bright_dec : np.ndarray
-        Positions of resolved (bright) stars in degrees.
-    bright_conditions : np.ndarray, shape (n_bright, n_cond)
-        Spectral conditions for resolved stars.
-    sky_map : np.ndarray, shape (n_cond, npix)
-        Complete sky in linear flux (nested ordering).
+        Maps ``(n_sources, n_cond)`` conditions to ``(n_sources, n_wvl)``
+        spectra.
+    sky_map : numpy.ndarray, shape (n_cond, npix)
+        Complete sky in linear flux, nested ordering.
+    bright_ra, bright_dec : numpy.ndarray or None
+        Positions of the resolved stars, in degrees.
+    bright_conditions : numpy.ndarray or None, shape (n_bright, n_cond)
+    brightness : array-like or None
+        Fittable amplitude on the whole catalog.
+    transform : str or None
+        Domain of *brightness*.
     """
 
     def __init__(
         self,
         geo,
         spectral_model: SpectralModel,
-        bright_ra: np.ndarray,
-        bright_dec: np.ndarray,
-        bright_conditions: np.ndarray,
         sky_map: np.ndarray,
+        *,
+        bright_ra: np.ndarray | None = None,
+        bright_dec: np.ndarray | None = None,
+        bright_conditions: np.ndarray | None = None,
+        brightness=None,
+        transform: str | None = "log",
     ):
-        self._wvls = geo.wvls
+        n_cond = np.shape(sky_map)[0]
+        bright_ra = np.zeros(0) if bright_ra is None else np.asarray(bright_ra)
+        bright_dec = np.zeros(0) if bright_dec is None else np.asarray(bright_dec)
+        super().__init__(
+            geo,
+            spectral_model,
+            SkyCoord(bright_ra * u.deg, bright_dec * u.deg, frame="icrs"),
+            brightness,
+            transform,
+        )
+        self._bright_conditions = (
+            np.zeros((0, n_cond)) if bright_conditions is None else bright_conditions
+        )
         self._nside = geo.nside
         self._sky_map = sky_map
         self._map_nside = hp.npix2nside(sky_map.shape[1])
-        self._bright_conditions = bright_conditions
-        self._coords = SkyCoord(
-            bright_ra * u.deg,
-            bright_dec * u.deg,
-            frame="icrs",
-        )
-        self._spectral_model = spectral_model
-        self._hpx_index = HEALPixCatalog(bright_ra, bright_dec)
-        self._lightcurves: list[tuple[int, np.ndarray]] = []
 
-    def resolved_in_fov(self, obs) -> dict[str, np.ndarray]:
-        """Resolved (individually rendered) stars in the FOV, in index order.
+    def _repr_parts(self) -> list[str]:
+        return [f"{len(self._coords)} sources", f"map nside={self._map_nside}"]
 
-        The returned position ``i`` is exactly the ``index`` accepted by
-        :meth:`add_lightcurve`: both use the same FOV catalog query, so the
-        ordering is guaranteed to match the point sources built by
-        :meth:`prepare`.
+    def _pop_conditions(self, idx: int) -> np.ndarray:
+        """This catalog's own photometry for the star.
+
+        A star popped from here stays in the flux subtracted from the map
+        pixel that holds it, so total flux is conserved: it leaves the
+        point-source list without leaving the sky.
+        """
+        return self._bright_conditions[idx]
+
+    def _subtract_resolved_flux(self, fov_pix, fov_flux, cat_idx):
+        """Remove resolved star flux from the quasi-point FOV pixels.
 
         Parameters
         ----------
-        obs : Observation
+        fov_pix : numpy.ndarray
+        fov_flux : numpy.ndarray, shape (n_cond, n_fov_pix)
+        cat_idx : numpy.ndarray
+            Every resolved star in the field, popped ones included: a popped
+            star is still rendered individually, by a different emitter.
 
         Returns
         -------
-        dict
-            ``ra_deg``, ``dec_deg`` and ``conditions`` (``[G, BP, RP]``) of
-            each resolved star, ordered by index.
-        """
-        target_icrs = obs.target_icrs.transform_to("icrs")
-        cat_idx = self._hpx_index.query(
-            target_icrs.ra.deg,
-            target_icrs.dec.deg,
-            np.degrees(obs.geom.fov),
-        )
-        coords = self._coords[cat_idx]
-        return {
-            "ra_deg": coords.ra.deg,
-            "dec_deg": coords.dec.deg,
-            "conditions": self._bright_conditions[cat_idx],
-        }
-
-    def add_lightcurve(self, index: int, curve) -> None:
-        """Modulate one resolved in-FOV star's brightness by a per-frame curve.
-
-        The curve multiplies the star's flux at every time step, which (because
-        the render is linear in each source's spectrum) is exactly an
-        occultation or variable-star light curve.
-
-        Parameters
-        ----------
-        index : int
-            Index into the resolved in-FOV star list (see
-            :meth:`resolved_in_fov`).  Only resolved stars (brighter than
-            ``lim_mag``) can be modulated individually.
-        curve : array-like
-            Per-observation multiplicative factor (``1.0`` leaves the star
-            unchanged, ``0.0`` fully blocks it).  Either ``(nobs,)`` for an
-            achromatic factor, or ``(nobs, n_wvl)`` evaluated on ``geo.wvls``
-            for a wavelength-dependent factor (e.g. a chromatic occultation).
-            The leading axis must match the number of observation times at
-            :meth:`prepare` time.
-        """
-        self._lightcurves.append((int(index), np.asarray(curve, dtype=float)))
-
-    def _subtract_resolved_flux(self, fov_pix, fov_flux, cat_idx):
-        """Remove resolved star flux from quasi-point FOV pixels.
-
-        Resolved stars are rendered as individual point sources; their
-        flux must be removed from the quasi-point pixel that contains
-        them to avoid double-counting within the point source path.
+        numpy.ndarray
         """
         if len(cat_idx) == 0:
             return fov_flux
@@ -143,7 +115,7 @@ class Stars(BaseEmitter):
                 fov_flux[:, fi] -= resolved_flux[j]
         return np.clip(fov_flux, 0, None)
 
-    def prepare(self, obs) -> SourceObsData:
+    def _prepare(self, obs) -> SourceObsData:
         """Extract resolved + quasi-point sources and build complete diffuse map.
 
         Parameters
@@ -156,23 +128,25 @@ class Stars(BaseEmitter):
         """
         # Resolved catalog stars in FOV
         target_icrs = obs.target_icrs.transform_to("icrs")
-        cat_idx = self._hpx_index.query(
+        cat_idx = self._index.query(
             target_icrs.ra.deg,
             target_icrs.dec.deg,
-            np.degrees(obs.geom.fov),
+            np.degrees(obs.geo.fov),
         )
-        resolved_cond = self._bright_conditions[cat_idx]
-        resolved_coords = self._coords[cat_idx]
+        # A star taken out with pop() is rendered by its own PointSource, so
+        # it leaves the resolved list.
+        point_idx = cat_idx[~self._taken[cat_idx]]
+        resolved_cond = self._bright_conditions[point_idx]
+        resolved_coords = self._coords[point_idx]
 
         # FOV map pixels as quasi-point sources (with one-pixel margin).
-        # Resolved star flux is subtracted to avoid double-counting within
-        # the point source path (resolved stars + quasi-point pixels).
+        # Resolved star flux is subtracted to avoid double-counting.
         center_vec = hp.ang2vec(target_icrs.ra.deg, target_icrs.dec.deg, lonlat=True)
         fov_margin = hp.nside2resol(self._map_nside)
         fov_pix = hp.query_disc(
             self._map_nside,
             center_vec,
-            obs.geom.fov + fov_margin,
+            obs.geo.fov + fov_margin,
             nest=True,
             inclusive=True,
         )
@@ -184,32 +158,12 @@ class Stars(BaseEmitter):
 
         source_conditions = jnp.asarray(np.vstack([resolved_cond, quasi_cond]))
 
-        # Per-source light curves (occultations, variable stars).  Resolved
-        # stars occupy indices [0, n_resolved) in both source_conditions and
-        # the per-obs source_coords stack, so the registered index maps
-        # directly onto a source column.  A curve may be achromatic ((nobs,))
-        # or wavelength-dependent ((nobs, n_wvl)); ``set_source_weight`` handles
-        # the array shape (2-D or 3-D) and promotion, shared with Scene editing.
-        n_resolved = len(resolved_cond)
-        n_src, n_wvl = source_conditions.shape[0], len(self._wvls)
-        source_weights = None
-        for idx, curve in self._lightcurves:
-            if not 0 <= idx < n_resolved:
-                raise IndexError(
-                    f"lightcurve index {idx} out of range; {n_resolved} resolved stars in FOV"
-                )
-            source_weights = set_source_weight(
-                source_weights, idx, curve, nobs=obs.nobs, n_src=n_src, n_wvl=n_wvl
-            )
-
         # Rotate diffuse map to AltAz and transform coords per observation.
-        # Complete sky_map is used for scattering (no FOV masking)
-        # resolved + quasi-point sources go through direct extinction.
         m_low = hp.ud_grade(
             self._sky_map, nside_out=self._nside, power=-2, order_in="NEST", order_out="RING"
         )
 
-        diffuse_list, coords_list = [], []
+        diffuse_list = []
         for i in range(obs.nobs):
             m_rot = -2.5 * np.log10(
                 np.clip(
@@ -218,128 +172,207 @@ class Stars(BaseEmitter):
                     None,
                 )
             )
-            diffuse_list.append(jnp.asarray(m_rot.T)[obs.geom.mask])
+            diffuse_list.append(jnp.asarray(m_rot.T)[obs.geo.mask])
 
-            if len(resolved_coords) > 0:
-                aa = resolved_coords.transform_to(obs.altaz_frames[i])
-                star_xy = np.column_stack([aa.az.rad, aa.alt.rad])
-            else:
-                star_xy = np.zeros((0, 2))
-            qa = quasi_skycoords.transform_to(obs.altaz_frames[i])
-            quasi_xy = np.column_stack([qa.az.rad, qa.alt.rad])
-            coords_list.append(jnp.asarray(np.vstack([star_xy, quasi_xy])))
+        # Resolved stars lead the quasi-point map pixels.
+        source_coords = np.concatenate(
+            [
+                altaz_track(resolved_coords, obs.times, obs.altaz_frames),
+                altaz_track(quasi_skycoords, obs.times, obs.altaz_frames),
+            ],
+            axis=1,
+        )
 
         return SourceObsData(
-            diffuse_conditions=jnp.stack(diffuse_list),
-            diffuse_norm=jnp.array(1.0 / obs.geom.pixel_area),
+            diffuse_conditions=PerObs(jnp.stack(diffuse_list)),
+            diffuse_norm=jnp.array(1.0 / obs.geo.pixel_area),
             source_conditions=source_conditions,
-            source_coords=jnp.stack(coords_list),
-            source_weights=source_weights,
+            source_coords=PerObs(jnp.asarray(source_coords)),
             direct=False,
-            _per_obs=("diffuse_conditions", "source_coords")
-            + (("source_weights",) if source_weights is not None else ()),
         )
 
     @classmethod
-    def from_gaia_dr3(cls, geo, lim_mag: float = 15.0) -> "Stars":
-        """Stars with Gaia DR3 catalog + Pickles (1998) spectral model.
+    def from_gaia_dr3(cls, geo, lim_mag: float = 15.0, **kwargs) -> Stars:
+        """Stars from the Gaia DR3 catalog, with a Pickles (1998) spectral model.
 
         Parameters
         ----------
         geo : Geometry
-            Resolution configuration.
         lim_mag : float
-            Limiting magnitude.  Brighter stars are resolved individually.
-        """
-        catalog = np.load(
-            download_file(
-                "https://zenodo.org/records/15396676/files/gaiadr3.npy",
-                cache=True,
-            )
-        )
-        faint_map = np.load(
-            download_file(
-                "https://zenodo.org/records/15396676/files/gaia_mag15plus.npy",
-                cache=True,
-            )
-        )
+            Limiting magnitude; brighter stars are resolved individually.
+        **kwargs
+            Passed to :class:`Stars`, e.g. ``brightness``.
 
-        bright_mask = catalog["phot_g_mean_mag"] < lim_mag
+        Returns
+        -------
+        Stars
+        """
+        catalog, faint_map = gaia.load_dr3()
+        g, bp, rp = gaia.photometry(catalog)
+
+        bright_mask = g < lim_mag
         bright_ra = catalog["ra"][bright_mask]
         bright_dec = catalog["dec"][bright_mask]
-        bright_conditions = np.column_stack(
-            [
-                catalog["phot_g_mean_mag"][bright_mask],
-                np.nan_to_num(catalog["phot_bp_mean_mag"][bright_mask].astype(float), nan=21.0),
-                np.nan_to_num(catalog["phot_rp_mean_mag"][bright_mask].astype(float), nan=21.0),
-            ]
-        )
+        bright_conditions = np.column_stack([g[bright_mask], bp[bright_mask], rp[bright_mask]])
 
         npix = len(faint_map[0])
         faint_flux = 10 ** (-0.4 * faint_map) + 1e-10
-        catalog_map = _build_gaia_catalog_map(catalog, npix)
-        sky_map = faint_flux + catalog_map
+        sky_map = faint_flux + gaia.catalog_map(g, bp, rp, catalog["ra"], catalog["dec"], npix)
 
-        spectral_model = _build_gaia_spectral_model(catalog, geo)
+        spectral_model = gaia.spectral_model(gaia.color_grid(bp, rp), geo)
 
-        return cls(geo, spectral_model, bright_ra, bright_dec, bright_conditions, sky_map)
+        return cls(
+            geo,
+            spectral_model,
+            sky_map,
+            bright_ra=bright_ra,
+            bright_dec=bright_dec,
+            bright_conditions=bright_conditions,
+            **kwargs,
+        )
 
 
-# Gaia DR3
+class BrightStars(CatalogEmitter):
+    """Pure point-source star catalog, with no diffuse map.
 
+    Each star is rendered on its own, with in-scattering computed
+    individually.
 
-def _build_gaia_catalog_map(catalog, npix):
-    """Bin all catalog stars into a HEALPix linear-flux map.
-
-    Returns ``(3, npix)`` in ``[G, BP, RP]`` order, nested ordering.
+    Parameters
+    ----------
+    geo : Geometry
+        Resolution configuration.
+    spectral_model : SpectralModel
+        Maps ``(n_stars, 3)`` conditions ``[v_mag, v_minus_b, active]`` to
+        ``(n_stars, n_wvl)`` spectra.
+    coords : astropy.coordinates.SkyCoord
+        Catalog positions with proper motions, at :data:`~nyx.emitter.catalogs.xhip.EPOCH`.
+    photometry : numpy.ndarray, shape (n_stars, 2)
+        Per-star ``[v_mag, v_minus_b]``.
+    brightness : array-like or None
+        Fittable amplitude on the whole catalog -- a photometric zero-point;
+        see :class:`~nyx.emitter.base.Emitter`.
+    transform : str or None
+        Domain of *brightness*.
     """
-    map_nside = hp.npix2nside(npix)
 
-    hp_inds = hp.ang2pix(
-        map_nside,
-        catalog["ra"],
-        catalog["dec"],
-        nest=True,
-        lonlat=True,
-    )
+    def __init__(
+        self,
+        geo,
+        spectral_model: SpectralModel,
+        coords: SkyCoord,
+        photometry: np.ndarray,
+        brightness=None,
+        transform: str | None = "log",
+    ):
+        super().__init__(geo, spectral_model, coords, brightness, transform)
+        self._photometry = np.asarray(photometry)
 
-    g_mag = catalog["phot_g_mean_mag"]
-    bp_mag = np.nan_to_num(catalog["phot_bp_mean_mag"], nan=21)
-    rp_mag = np.nan_to_num(catalog["phot_rp_mean_mag"], nan=21)
+    def _repr_parts(self) -> list[str]:
+        return [f"{len(self._coords)} sources"]
 
-    return np.vstack(
-        [
-            np.bincount(hp_inds, 10 ** (-0.4 * g_mag), npix),
-            np.bincount(hp_inds, 10 ** (-0.4 * bp_mag), npix),
-            np.bincount(hp_inds, 10 ** (-0.4 * rp_mag), npix),
-        ]
-    )
+    _pop_inscatter = True
+
+    def _pop_conditions(self, idx: int) -> np.ndarray:
+        """This catalog's photometry for the star, with ``active=1`` appended."""
+        return np.append(self._photometry[idx], 1.0)
+
+    def _prepare(self, obs) -> SourceObsData:
+        """Propagate positions to each observation epoch and mask the horizon.
+
+        Parameters
+        ----------
+        obs : Observation
+
+        Returns
+        -------
+        SourceObsData
+            ``source_conditions`` carries ``[v_mag, v_minus_b, active]``.
+        """
+        kept = ~self._taken
+        coords, photometry = self._coords[kept], self._photometry[kept]
+
+        track = altaz_track(coords, obs.times, obs.altaz_frames)  # (nobs, n_src, 2)
+        active = (track[..., 1] > 0).astype(float)  # above the horizon
+        conditions = np.stack([np.column_stack([photometry, a]) for a in active])
+
+        return SourceObsData(
+            source_conditions=PerObs(jnp.asarray(conditions)),
+            source_coords=PerObs(jnp.asarray(track)),
+            inscatter=True,
+        )
+
+    @classmethod
+    def from_anderson2012(cls, geo, **kwargs) -> BrightStars:
+        """Bright stars from the XHIP compilation (Anderson & Francis 2012).
+
+        Spectra come from the Johnson V-B colour index against the Pickles
+        (1998) library.
+
+        Parameters
+        ----------
+        geo : Geometry
+        **kwargs
+            Passed to :class:`BrightStars`, e.g. ``brightness``.
+
+        Returns
+        -------
+        BrightStars
+        """
+        coords, photometry = xhip.load_anderson2012()
+        spectral_model = xhip.spectral_model(photometry[:, 1], geo)
+        return cls(geo, spectral_model, coords, photometry, **kwargs)
 
 
-def _build_gaia_spectral_model(catalog, geo):
-    """Build a Pickles (1998) spectral model for Gaia photometry.
+def gaia_star_field(geo, lim_mag: float = 7.0):
+    """Split Gaia DR3 into all-sky point sources and the background they leave.
 
-    Uses the full catalog color range so the model is independent
-    of lim_mag.
+    The catalog is partitioned exactly once, so no star is counted twice.
+    Needs network access on first use, for the catalog and the Gaia
+    passbands.
+
+    Parameters
+    ----------
+    geo : Geometry
+        Resolution configuration.
+    lim_mag : float
+        Split magnitude in the Gaia ``G`` band; the naked-eye limit is
+        around 6.5.
+
+    Returns
+    -------
+    points : BrightStars
+        All-sky point sources brighter than *lim_mag*.
+    background : Stars
+        The remainder as a diffuse map, plus the pre-integrated faint-star
+        map.
     """
-    bp = np.nan_to_num(catalog["phot_bp_mean_mag"], nan=21)
-    rp = np.nan_to_num(catalog["phot_rp_mean_mag"], nan=21)
-    rp_bp = rp - bp
+    catalog, faint_map = gaia.load_dr3()
+    g, bp, rp = gaia.photometry(catalog)
+    bright = g < lim_mag
 
-    G = Bandpass.from_SVO("GAIA/GAIA3.G")
-    BP = Bandpass.from_SVO("GAIA/GAIA3.Gbp")
-    RP = Bandpass.from_SVO("GAIA/GAIA3.Grp")
+    npix = len(faint_map[0])
+    faint_flux = 10 ** (-0.4 * faint_map) + 1e-10
+    faint = ~bright
+    background_map = faint_flux + gaia.catalog_map(
+        g[faint], bp[faint], rp[faint], catalog["ra"][faint], catalog["dec"][faint], npix
+    )
 
-    spec_grid = create_color_grid(
-        G,
-        (RP, BP),
-        [np.nanmin(rp_bp), 0.5],
-        PicklesTRDSAtlas1998(),
-        photon_flux=True,
+    grid = gaia.color_grid(bp, rp)
+    background = Stars(geo, gaia.spectral_model(grid, geo), background_map)
+
+    coords = SkyCoord(
+        ra=catalog["ra"][bright] * u.deg,
+        dec=catalog["dec"][bright] * u.deg,
+        pm_ra_cosdec=np.zeros(int(bright.sum())) * u.mas / u.yr,
+        pm_dec=np.zeros(int(bright.sum())) * u.mas / u.yr,
+        obstime=Time(gaia.EPOCH),
+        frame="icrs",
     )
-    return ParametricSpectrum.from_color_grid(
-        spec_grid,
-        geo.wvls,
-        color_fn=lambda c: c[..., 2] - c[..., 1],  # RP - BP
-        mag_fn=lambda c: c[..., 0],  # G
+    points = BrightStars(
+        geo,
+        gaia.spectral_model(grid, geo, horizon_mask=True),
+        coords,
+        np.column_stack([g[bright], bp[bright], rp[bright]]),
     )
+    return points, background

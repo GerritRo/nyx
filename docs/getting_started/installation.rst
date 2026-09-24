@@ -11,9 +11,9 @@ Dependencies
 
 Core dependencies are installed automatically:
 
-- numpy, scipy, h5py
+- numpy, scipy
 - astropy, healpy, jax-healpy
-- jax, equinox, chex, optimistix
+- jax, equinox, optimistix
 - dust-extinction
 
 Quick Install
@@ -66,12 +66,6 @@ matching CUDA wheel *after* installing nyx, for example:
 
 See the `JAX installation guide <https://docs.jax.dev/en/latest/installation.html>`_
 for the wheel that matches your CUDA/driver versions.
-
-.. note::
-
-   nyx sets ``jax_default_matmul_precision="highest"`` on import and the
-   instrument model runs in single precision (float32). This keeps results
-   consistent across CPU and GPU backends.
 
 Scientific Datasets
 -------------------

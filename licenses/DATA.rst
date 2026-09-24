@@ -9,7 +9,7 @@ If you publish results obtained with nyx, you are responsible for citing the
 datasets you used in addition to citing nyx itself (see ``CITATION.cff`` in
 the repository root).
 
-The nyx source code is licensed under BSD-3-Clause (see ``LICENSE.rst``).
+The nyx source code is licensed under BSD-3-Clause (see ``LICENSE``).
 The datasets described below are **not** covered by that license; they
 remain under the terms of their respective originators. In particular, the
 Gaia-derived dataset downloaded at runtime is distributed by ESA under a
@@ -18,14 +18,15 @@ configurations that rely on this dataset requires separate arrangement with
 ESA.
 
 
-Bundled data (shipped in ``nyx/data/``)
----------------------------------------
+Bundled data (shipped inside the package, in ``nyx/data/``)
+-----------------------------------------------------------
 
 Pickles (1998) stellar spectral atlas
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 :Files: ``pickles1998_trds_atlas.dat``
-:Used by: ``nyx.utils.spectra.PicklesTRDSAtlas1998``
+:Used by: ``nyx.spectra.SpectralGrid.from_pickles1998``, behind the stellar
+   spectral models of ``Stars``, ``BrightStars`` and ``gaia_star_field``
 :Description: Library of stellar spectral templates spanning a wide range of
    spectral types, used here as the empirical spectral model for stars.
 :Reference: Pickles, A. J. 1998, "A Stellar Spectral Flux Library:
@@ -37,7 +38,7 @@ Leinert et al. (1998) zodiacal light
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 :Files: ``leinert1998_zodiacal_light.dat``
-:Used by: ``nyx.emitter.zodiacal.Leinert1998``
+:Used by: ``nyx.emitter.ZodiacalLight.from_leinert1998``
 :Description: Tabulated zodiacal light brightness as a function of ecliptic
    coordinates.
 :Reference: Leinert, C., Bowyer, S., Haikala, L. K., et al. 1998, "The 1997
@@ -50,10 +51,10 @@ ROLO lunar irradiance model coefficients
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 :Files: ``jones2013_lunar_rolo.dat``
-:Used by: ``nyx.emitter.moon.Jones2013``
+:Used by: ``nyx.emitter.Moon.from_jones2013``
 :Description: Fit coefficients of the ROLO (RObotic Lunar Observatory) lunar
-   irradiance model, in 22 wavelength bands.
-:Note on naming: The file name and the ``Jones2013`` API name refer to the
+   irradiance model, in 25 wavelength bands.
+:Note on naming: The file name and ``Moon.from_jones2013`` refer to the
    sky-brightness model of Jones et al. (2013), which adopts the ROLO model.
    The coefficient values themselves originate with Kieffer & Stone (2005).
    Both works should be cited.
@@ -71,7 +72,8 @@ ESO SkyCalc airglow and ozone spectra
 
 :Files: ``eso_skycalc_airglow_130sfu.dat``,
    ``eso_skycalc_ozone_absorption.dat``
-:Used by: ``nyx.emitter.airglow.ESOSkyCalc`` and the ozone transmission code
+:Used by: ``nyx.emitter.Airglow.from_eso_skycalc`` (airglow) and
+   ``nyx.atmosphere.tau_ozone``, behind ``SingleScattering.from_hg_ozone`` (ozone)
 :Description: Airglow emission spectrum (at 130 solar flux units) and ozone
    absorption spectrum, generated with the ESO SkyCalc Sky Model Calculator
    (https://www.eso.org/observing/etc/skycalc/).
@@ -82,6 +84,25 @@ ESO SkyCalc airglow and ozone spectra
      DOI: 10.1051/0004-6361/201322433
 :Usage terms: Output of the publicly available ESO SkyCalc tool; please cite
    the references above and acknowledge the ESO SkyCalc tool.
+
+XHIP bright-star compilation (Anderson & Francis 2012)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:Files: ``anderson2012_xhip_suppl.dat``
+:Used by: ``nyx.emitter.catalogs.xhip``, behind
+   ``nyx.emitter.BrightStars.from_anderson2012``
+:Description: Positions, proper motions and UBVRI photometry for the
+   Hipparcos bright stars, extracted from the XHIP compilation and
+   distributed via the CDS/VizieR service.
+:References:
+   * Anderson, E. & Francis, C. 2012, "XHIP: An extended Hipparcos
+     compilation", Astronomy Letters, 38, 331.
+     DOI: 10.1134/S1063773712050015
+   * VizieR catalogue V/137D.
+:Usage terms: Distributed by the Centre de Donnees astronomiques de
+   Strasbourg (CDS). Please cite the reference above and acknowledge the
+   use of the VizieR catalogue access tool, CDS, Strasbourg, France
+   (DOI: 10.26093/cds/vizier).
 
 Data downloaded at runtime
 --------------------------
@@ -95,7 +116,7 @@ Gaia DR3 stellar catalogue
 :Source: Zenodo record 15396676
    (``gaiadr3.npy``, ``gaia_mag15plus.npy``);
    https://zenodo.org/records/15396676
-:Used by: ``nyx.emitter.stars.GaiaDR3``
+:Used by: ``nyx.emitter.Stars.from_gaia_dr3`` and ``nyx.emitter.gaia_star_field``
 :Description: Simplified star catalogue derived from Gaia Data Release 3
    catalogue, repackaged for stellar-contribution simulations.
 :References:
@@ -130,8 +151,9 @@ STScI solsys solar spectrum (Rieke 2008)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 :Source: STScI synphot reference atlases, ``grid/solsys/solar_spec.fits``
    (https://archive.stsci.edu/hlsps/reference-atlases/cdbs/grid/solsys/)
-:Used by: ``nyx.utils.spectra.SolarSpectrumRieke2008``,
-   ``nyx.utils.spectra.load_solar_flux``
+:Used by: ``nyx.spectra.load_solar_spectrum_rieke2008`` and
+   ``nyx.spectra.load_solar_flux``, behind ``Moon.from_jones2013`` and
+   ``ZodiacalLight.from_leinert1998``
 :Description: Composite solar spectrum (0.2–30 µm) distributed with Rieke
    et al. (2008). Built from Thuillier et al. (2003) below 2.4 µm, the
    Holweger & Müller (1974) LTE model at longer wavelengths, with the
@@ -144,10 +166,12 @@ STScI solsys solar spectrum (Rieke 2008)
 
 STScI CALSPEC Vega spectrum
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
-:Source: STScI CALSPEC database, ``alpha_lyr_stis_011.fits``
+:Source: STScI CALSPEC database, ``alpha_lyr_stis_012.fits``
    (https://www.stsci.edu/hst/instrumentation/reference-data-for-calibration-and-tools/astronomical-catalogs/calspec)
-:Used by: the ``Bandpass`` zero-point code
-:Description: Composite absolute-flux SED of Vega (α Lyr) on the HST/CALSPEC
+:Used by: ``nyx.spectra.Bandpass.vegazero``, behind the colour grids of
+   ``Stars.from_gaia_dr3``, ``gaia_star_field`` and
+   ``BrightStars.from_anderson2012``
+:Description: Composite absolute-flux SED of Vega on the HST/CALSPEC
    flux scale, combining STIS spectrophotometry with a tailored Kurucz
    9550 K model atmosphere. Used as the primary optical/IR flux standard.
 :Reference: Bohlin, R. C., Hubeny, I. & Rauch, T. 2020, "New Grids of
@@ -162,8 +186,9 @@ SVO Filter Profile Service
 
 :Source: Spanish Virtual Observatory Filter Profile Service
    (http://svo2.cab.inta-csic.es/theory/fps/)
-:Used by: ``nyx.utils.spectra.Bandpass.from_SVO`` (e.g. the Gaia DR3 G/BP/RP
-   passbands)
+:Used by: ``nyx.spectra.Bandpass.from_SVO``: the Gaia DR3 G/BP/RP passbands
+   for ``Stars.from_gaia_dr3`` and ``gaia_star_field``, and the Johnson B/V
+   passbands for ``BrightStars.from_anderson2012``
 :Description: Filter transmission curves.
 :References:
    * Rodrigo, C., Cruz, P., Aguilar, J.F., et al. 2024; https://ui.adsabs.harvard.edu/abs/2024A%26A...689A..93R/abstract

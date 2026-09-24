@@ -1,8 +1,7 @@
 # nyx
 
 ![Python](https://img.shields.io/badge/python-3.12-blue)
-[![License](https://img.shields.io/badge/license-BSD--3--Clause-green)](licenses/LICENSE.rst)
-[![Checked with mypy](http://www.mypy-lang.org/static/mypy_badge.svg)](http://mypy-lang.org/)
+[![License](https://img.shields.io/badge/license-BSD--3--Clause-green)](LICENSE)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
 **Differentiable Simulation of Night Sky Background in Imaging Atmospheric Cherenkov Telescopes**
@@ -42,7 +41,7 @@ cd docs && make html
 
 ## License
 
-BSD-3-Clause License - see [LICENSE](licenses/LICENSE.rst) for details.
+BSD-3-Clause License - see [LICENSE](LICENSE) for details.
 
 ## Citation
 

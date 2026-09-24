@@ -2,7 +2,7 @@ Motivation
 ==========
 
 Why do a Differentiable Implementation?
--------------------------------
+---------------------------------------
 
 nyx is a follow-up of the `nsb2 <https://github.com/GerritRo/nsb2>`_ package, 
 differing mainly in its differentiability and faster computation, as well as optimization features.
