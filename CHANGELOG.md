@@ -1,3 +1,9 @@
+## v0.2.1 (2026-09-27)
+
+### Fix
+
+- **pyproject**: change name to nyx-astro for pypi
+
 ## v0.2.0 (2026-09-24)
 
 ### Feat
