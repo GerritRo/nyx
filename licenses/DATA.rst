@@ -1,9 +1,9 @@
-Data Attribution
-================
+LicenseRef-Nyx-Data
+===================
 
-nyx bundles and/or downloads scientific datasets produced by third parties.
-This document records, for each dataset, its provenance, the reference to
-cite, and its license or usage terms.
+The data files in nyx/data/ are not covered by the BSD-3-Clause license.
+They are redistributed for scientific use under the terms of their original
+sources, with attribution as listed below.
 
 If you publish results obtained with nyx, you are responsible for citing the
 datasets you used in addition to citing nyx itself (see ``CITATION.cff`` in

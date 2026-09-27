@@ -10,7 +10,7 @@ authors:
     given-names: "Gerrit"
     email: "gerrit.roellinghoff@fau.de"
 version: "0.2.0"
-date-released: "2026-06-05"
+date-released: "2026-09-27"
 license: BSD-3-Clause
 repository-code: "https://github.com/GerritRo/nyx"
 url: "https://gerritro.github.io/nyx/"
