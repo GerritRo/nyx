@@ -41,7 +41,7 @@ cd docs && make html
 
 ## License
 
-BSD-3-Clause License - see [LICENSE](LICENSE) for details.
+BSD-3-Clause License - see [LICENSE](https://github.com/GerritRo/nyx/blob/main/LICENSE) for details.
 
 ## Citation
 
@@ -53,5 +53,5 @@ nyx bundles and downloads scientific datasets produced by third parties
 (Pickles 1998, Leinert et al. 1998, the ROLO lunar model, ESO SkyCalc,
 Gaia DR3, STScI CALSPEC, and the SVO Filter Profile Service). These datasets
 carry their own citation and acknowledgement requirements. If you publish 
-results obtained with nyx, cite the datasets you used as described in
-[licenses/DATA.rst](licenses/DATA.rst).
+results obtained with nyx, cite the datasets you used as described in 
+[licenses/DATA.rst](https://github.com/GerritRo/nyx/blob/main/licenses/DATA.rst).
